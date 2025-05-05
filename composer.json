@@ -23,7 +23,7 @@
       "Cognesy\\Tell\\Tests\\": "tests/"
     }
   },
-  "version": "0.17.3",
+  "version": "0.17.5",
   "require": {
     "php": "^8.2",
     "cognesy/instructor-polyglot": "^0.17"
@@ -40,8 +40,12 @@
   "scripts": {
     "tests": "@php vendor/bin/pest",
     "phpstan": "@php vendor/bin/phpstan -c phpstan.neon",
-    "psalm": "@php vendor/bin/psalm"
+    "psalm": "@php vendor/bin/psalm",
+    "tell": "bin/tell"
   },
+  "bin": [
+    "bin/tell"
+  ],
   "config": {
     "allow-plugins": {
       "pestphp/pest-plugin": true
