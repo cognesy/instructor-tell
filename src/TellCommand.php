@@ -2,9 +2,8 @@
 
 namespace Cognesy\Tell;
 
-use Cognesy\Polyglot\LLM\Data\LLMConfig;
-use Cognesy\Polyglot\LLM\Inference;
-use Cognesy\Polyglot\LLM\InferenceResponse;
+use Cognesy\Polyglot\Inference\Inference;
+use Cognesy\Polyglot\Inference\PendingInference;
 use Symfony\Component\Console\Command\Command;
 use Symfony\Component\Console\Input\InputArgument;
 use Symfony\Component\Console\Input\InputInterface;
@@ -19,7 +18,7 @@ class TellCommand extends Command
         $this->setName(self::$defaultName)
             ->setDescription('Prompt AI')
             ->addArgument('prompt', InputArgument::REQUIRED, 'Prompt')
-            ->addOption('connection', 'c', InputOption::VALUE_OPTIONAL, 'The connection option', 'openai')
+            ->addOption('connection', 'c', InputOption::VALUE_OPTIONAL, 'LLM connection preset', 'openai')
             ->addOption('model', 'm', InputOption::VALUE_OPTIONAL, 'The model option', '')
             ->addOption('dsn', 'd', InputOption::VALUE_OPTIONAL, 'The DSN option', '');
     }
@@ -28,12 +27,12 @@ class TellCommand extends Command
         $prompt = $input->getArgument('prompt');
 
         $dsn = $input->getOption('dsn');
-        $connection = $input->getOption('connection');
+        $preset = $input->getOption('connection');
         $model = $input->getOption('model');
 
         $response = match(true) {
-            empty($dsn) => $this->inferenceFromConnection($connection, $prompt, $model),
-            default => $this->inferenceFromDSN($dsn, $prompt),
+            empty($dsn) => $this->inferenceUsingPreset($preset, $prompt, $model),
+            default => $this->inferenceUsingDSN($dsn, $prompt),
         };
 
         foreach ($response->stream()->responses() as $response) {
@@ -44,23 +43,24 @@ class TellCommand extends Command
         return Command::SUCCESS;
     }
 
-    protected function inferenceFromDSN(string $dsn, string $prompt) : InferenceResponse {
-        return Inference
-            ::fromDsn($dsn)
-            ->create(
+    protected function inferenceUsingDSN(string $dsn, string $prompt) : PendingInference {
+        return (new Inference)
+            ->fromDSN($dsn)
+            ->with(
                 messages: $prompt,
                 options: ['stream' => true],
-            );
+            )
+            ->create();
     }
 
-    protected function inferenceFromConnection(string $connection, string $prompt, string $model = '') : InferenceResponse {
-        $model = $model ?: LLMConfig::load($connection)->model;
+    protected function inferenceUsingPreset(string $preset, string $prompt, string $model = '') : PendingInference {
         return (new Inference)
-            ->withConnection($connection)
-            ->create(
+            ->using($preset)
+            ->with(
                 messages: $prompt,
                 model: $model,
                 options: ['stream' => true],
-            );
+            )
+            ->create();
     }
 }
