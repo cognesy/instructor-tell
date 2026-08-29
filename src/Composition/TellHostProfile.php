@@ -10,8 +10,8 @@ use InvalidArgumentException;
 final readonly class TellHostProfile
 {
     /**
-     * @param list<TellModuleDefinition> $modules
-     * @param list<class-string> $requiredCapabilities
+     * @param  list<TellModuleDefinition>  $modules
+     * @param  list<class-string>  $requiredCapabilities
      */
     public function __construct(
         public string $name,
@@ -23,8 +23,7 @@ final readonly class TellHostProfile
         }
     }
 
-    public static function empty(string $name = 'custom'): self
-    {
+    public static function empty(string $name = 'custom'): self {
         return new self($name, []);
     }
 }

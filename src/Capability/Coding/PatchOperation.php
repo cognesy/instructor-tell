@@ -18,8 +18,7 @@ final readonly class PatchOperation
 
     private string $root;
 
-    public function __construct(string $baseDir)
-    {
+    public function __construct(string $baseDir) {
         $root = realpath($baseDir);
         if ($root === false || !is_dir($root)) {
             throw new RuntimeException("Tell patch root does not exist: {$baseDir}");
@@ -28,10 +27,9 @@ final readonly class PatchOperation
     }
 
     /** @return array<string, mixed> */
-    public function applyUnified(string $patch): array
-    {
+    public function applyUnified(string $patch): array {
         if ($patch === '' || strlen($patch) > self::MAX_PATCH_BYTES) {
-            return $this->failure('invalid_patch_size', 'Patch must be between 1 byte and '.self::MAX_PATCH_BYTES.' bytes.');
+            return $this->failure('invalid_patch_size', 'Patch must be between 1 byte and ' . self::MAX_PATCH_BYTES . ' bytes.');
         }
 
         try {
@@ -55,8 +53,7 @@ final readonly class PatchOperation
     }
 
     /** @return array<string, mixed> */
-    public function replace(string $path, string $old, string $new, bool $replaceAll): array
-    {
+    public function replace(string $path, string $old, string $new, bool $replaceAll): array {
         if ($old === '') {
             return $this->failure('empty_old_string', 'old_string cannot be empty.');
         }
@@ -91,8 +88,7 @@ final readonly class PatchOperation
     }
 
     /** @return list<array{path: string, hunks: list<array{oldStart: int, oldCount: int, newStart: int, newCount: int, lines: list<array{kind: string, value: string}>}>}> */
-    private function parse(string $patch): array
-    {
+    private function parse(string $patch): array {
         $lines = explode("\n", str_replace("\r\n", "\n", $patch));
         if (end($lines) === '') {
             array_pop($lines);
@@ -134,8 +130,7 @@ final readonly class PatchOperation
         return array_values($files);
     }
 
-    private function headerPath(string $header): string
-    {
+    private function headerPath(string $header): string {
         $path = trim(explode("\t", $header, 2)[0]);
         if (str_starts_with($path, 'a/') || str_starts_with($path, 'b/')) {
             $path = substr($path, 2);
@@ -148,8 +143,7 @@ final readonly class PatchOperation
     }
 
     /** @param list<string> $lines @return array{oldStart: int, oldCount: int, newStart: int, newCount: int, lines: list<array{kind: string, value: string}>} */
-    private function parseHunk(array $lines, int &$index): array
-    {
+    private function parseHunk(array $lines, int &$index): array {
         $header = $lines[$index];
         if (preg_match('/^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$/', $header, $matches) !== 1) {
             throw new PatchFailure('malformed_patch', "Invalid hunk header: {$header}");
@@ -183,16 +177,15 @@ final readonly class PatchOperation
     }
 
     /** @return array{path: string, content: string, hash: string} */
-    private function readSource(string $relative): array
-    {
+    private function readSource(string $relative): array {
         $candidate = str_starts_with($relative, DIRECTORY_SEPARATOR)
             ? $relative
-            : $this->root.DIRECTORY_SEPARATOR.$relative;
+            : $this->root . DIRECTORY_SEPARATOR . $relative;
         if (is_link($candidate)) {
             throw new PatchFailure('path_denied', "Refusing symlink target: {$relative}");
         }
         $path = realpath($candidate);
-        if ($path === false || !is_file($path) || !str_starts_with($path, $this->root.DIRECTORY_SEPARATOR)) {
+        if ($path === false || !is_file($path) || !str_starts_with($path, $this->root . DIRECTORY_SEPARATOR)) {
             throw new PatchFailure('path_denied', "Path is not an existing regular file inside the Tell working directory: {$relative}");
         }
         $content = file_get_contents($path);
@@ -200,15 +193,14 @@ final readonly class PatchOperation
             throw new PatchFailure('read_failed', "Unable to read {$relative}.");
         }
         if (strlen($content) > self::MAX_SOURCE_BYTES) {
-            throw new PatchFailure('source_too_large', "{$relative} exceeds the ".self::MAX_SOURCE_BYTES.'-byte patch source limit.');
+            throw new PatchFailure('source_too_large', "{$relative} exceeds the " . self::MAX_SOURCE_BYTES . '-byte patch source limit.');
         }
 
         return ['path' => $path, 'content' => $content, 'hash' => hash('sha256', $content)];
     }
 
     /** @param list<array{oldStart: int, oldCount: int, newStart: int, newCount: int, lines: list<array{kind: string, value: string}>}> $hunks */
-    private function applyHunks(string $source, array $hunks, string $relative): string
-    {
+    private function applyHunks(string $source, array $hunks, string $relative): string {
         $eol = str_contains($source, "\r\n") ? "\r\n" : "\n";
         $hasFinalNewline = str_ends_with($source, $eol);
         if (!$hasFinalNewline) {
@@ -239,12 +231,11 @@ final readonly class PatchOperation
         }
         array_push($output, ...array_slice($sourceLines, $cursor));
 
-        return implode($eol, $output).$eol;
+        return implode($eol, $output) . $eol;
     }
 
     /** @param list<array{path: string, relative: string, source: string, hash: string, content: string}> $changes @return array<string, mixed> */
-    private function commit(array $changes): array
-    {
+    private function commit(array $changes): array {
         $temporary = [];
         $backups = [];
         try {
@@ -281,6 +272,7 @@ final readonly class PatchOperation
                 }
             }
             $this->cleanup(array_values($temporary), $backups);
+
             return $this->failure($failure->reason, $failure->getMessage(), $partial);
         }
         $this->cleanup([], $backups);
@@ -299,8 +291,7 @@ final readonly class PatchOperation
     }
 
     /** @param list<string> $temporary @param list<string> $backups */
-    private function cleanup(array $temporary, array $backups): void
-    {
+    private function cleanup(array $temporary, array $backups): void {
         foreach (array_merge($temporary, $backups) as $path) {
             if ($path !== '' && is_file($path)) {
                 unlink($path);
@@ -309,8 +300,7 @@ final readonly class PatchOperation
     }
 
     /** @return array<string, mixed> */
-    private function failure(string $code, string $message, bool $partial = false): array
-    {
+    private function failure(string $code, string $message, bool $partial = false): array {
         return [
             'success' => false,
             'operation' => 'apply_patch',
@@ -324,8 +314,7 @@ final readonly class PatchOperation
 
 final class PatchFailure extends RuntimeException
 {
-    public function __construct(public readonly string $reason, string $message)
-    {
+    public function __construct(public readonly string $reason, string $message) {
         parent::__construct($message);
     }
 }

@@ -5,8 +5,8 @@ declare(strict_types=1);
 namespace Cognesy\Tell\Runtime;
 
 use Cognesy\Agents\Capability\Cancellation\CanProvideCancellationSignal;
-use Cognesy\Tell\Contracts\CanResolveTellConfiguration;
 use Cognesy\Tell\Contracts\CanObserveTellExecution;
+use Cognesy\Tell\Contracts\CanResolveTellConfiguration;
 
 /** @internal Static-composition bridge; applications use CanBuildTellAgent. */
 interface CanOpenTellRuntime
@@ -17,6 +17,6 @@ interface CanOpenTellRuntime
         ?CanObserveTellExecution $observer = null,
     ): TellRuntime;
 
-    /** @internal Compatibility bridge while legacy workspace facades are migrated. */
+    /** @internal Composition access for workspace-facing modules. */
     public function agents(): TellAgentFactory;
 }

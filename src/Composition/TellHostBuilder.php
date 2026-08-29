@@ -4,17 +4,14 @@ declare(strict_types=1);
 
 namespace Cognesy\Tell\Composition;
 
-use Cognesy\Tell\Composition\TellHostBootstrap;
-use Cognesy\Tell\Composition\TellHostProfile;
-use Cognesy\Tell\Composition\TellModuleDefinition;
 use InvalidArgumentException;
 
 /** Immutable pre-boot graph editor. */
 final readonly class TellHostBuilder
 {
     /**
-     * @param list<TellModuleDefinition> $modules
-     * @param list<class-string> $requiredCapabilities
+     * @param  list<TellModuleDefinition>  $modules
+     * @param  list<class-string>  $requiredCapabilities
      */
     private function __construct(
         private string $profile,
@@ -22,23 +19,19 @@ final readonly class TellHostBuilder
         private array $requiredCapabilities,
     ) {}
 
-    public static function fromProfile(TellHostProfile $profile): self
-    {
+    public static function fromProfile(TellHostProfile $profile): self {
         return new self($profile->name, $profile->modules, $profile->requiredCapabilities);
     }
 
-    public static function empty(string $profile = 'custom'): self
-    {
+    public static function empty(string $profile = 'custom'): self {
         return self::fromProfile(TellHostProfile::empty($profile));
     }
 
-    public function with(TellModuleDefinition $module): self
-    {
+    public function with(TellModuleDefinition $module): self {
         return new self($this->profile, [...$this->modules, $module], $this->requiredCapabilities);
     }
 
-    public function replace(string $moduleId, TellModuleDefinition $replacement): self
-    {
+    public function replace(string $moduleId, TellModuleDefinition $replacement): self {
         $modules = $this->modules;
         foreach ($modules as $index => $module) {
             if ($module->id !== $moduleId) {
@@ -52,8 +45,7 @@ final readonly class TellHostBuilder
         throw new InvalidArgumentException("Tell module {$moduleId} cannot be replaced because it is not in the graph.");
     }
 
-    public function without(string $moduleId): self
-    {
+    public function without(string $moduleId): self {
         $modules = array_values(array_filter(
             $this->modules,
             static fn (TellModuleDefinition $module): bool => $module->id !== $moduleId,
@@ -66,8 +58,7 @@ final readonly class TellHostBuilder
     }
 
     /** @param class-string ...$capabilities */
-    public function require(string ...$capabilities): self
-    {
+    public function require(string ...$capabilities): self {
         return new self(
             $this->profile,
             $this->modules,
@@ -75,8 +66,7 @@ final readonly class TellHostBuilder
         );
     }
 
-    public function boot(): TellHost
-    {
+    public function boot(): TellHost {
         return TellHostBootstrap::boot($this->profile, $this->modules, $this->requiredCapabilities);
     }
 }

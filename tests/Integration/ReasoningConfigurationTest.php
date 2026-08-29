@@ -2,28 +2,30 @@
 
 declare(strict_types=1);
 
-require_once dirname(__DIR__).'/Pest.php';
+require_once dirname(__DIR__) . '/Pest.php';
 
-use Cognesy\Tell\Runtime\TellOptions;
+use Cognesy\Agents\Drivers\ToolCalling\ToolCallingDriver;
+use Cognesy\Polyglot\Inference\Reasoning\ReasoningEffort;
+use Cognesy\Polyglot\Inference\Reasoning\ReasoningSelection;
+use Cognesy\Tell\Console\TellOptions;
+use Cognesy\Tell\Data\TellRequest;
 use Cognesy\Tell\Tell;
-use Cognesy\Tell\TellReasoningEffort;
-use Cognesy\Tell\TellRequest;
 
 it('keeps typed request reasoning intent immutable across request builders', function (): void {
     $request = TellRequest::prompt('Reason deliberately.')
         ->withDirectory(tellTestProject())
-        ->reasoningEffort(TellReasoningEffort::High)
+        ->reasoningEffort(ReasoningEffort::High)
         ->model('deepseek-v4-pro')
         ->maxSteps(3);
 
-    expect($request->reasoningEffort)->toBe(TellReasoningEffort::High)
+    expect($request->reasoningEffort)->toBe(ReasoningEffort::High)
         ->and($request->reasoningEffortExplicit)->toBeTrue()
         ->and($request->toOptions()->reasoningEffortSource())->toBe('invocation');
 });
 
 it('persists branch reasoning intent and reports branch and invocation provenance', function (): void {
     $factory = tellTestFactory();
-    $project = tellLastTemporaryRoot().'/reasoning-workspace';
+    $project = tellLastTemporaryRoot() . '/reasoning-workspace';
     mkdir($project, 0700, true);
     $tell = Tell::open($project, $factory);
     $tell->workspace()->initialize();
@@ -34,7 +36,7 @@ it('persists branch reasoning intent and reports branch and invocation provenanc
 
     $branch = $configuration->effective();
     $invocation = $configuration->effective(
-        TellRequest::prompt('Use less reasoning.')->reasoningEffort(TellReasoningEffort::Low),
+        TellRequest::prompt('Use less reasoning.')->reasoningEffort(ReasoningEffort::Low),
     );
 
     expect($stored->values['reasoningEffort'])->toBe('medium')
@@ -61,44 +63,47 @@ it('applies request-over-branch reasoning precedence', function (): void {
     $invocation = (new TellOptions(
         prompt: 'invocation effort',
         directory: $branch->directory,
-        reasoningEffort: TellReasoningEffort::High,
+        reasoningEffort: ReasoningEffort::High,
         reasoningEffortExplicit: true,
     ))->withBranchConfig(['reasoningEffort' => 'low']);
 
-    expect($branch->reasoningEffort)->toBe(TellReasoningEffort::Medium)
+    expect($branch->reasoningEffort)->toBe(ReasoningEffort::Medium)
         ->and($branch->reasoningEffortSource())->toBe('branch')
-        ->and($invocation->reasoningEffort)->toBe(TellReasoningEffort::High)
+        ->and($invocation->reasoningEffort)->toBe(ReasoningEffort::High)
         ->and($invocation->reasoningEffortSource())->toBe('invocation');
 });
 
-it('translates typed effort into provider-native Polyglot options', function (string $connection, string $model, array $expected): void {
+it('passes typed effort to Polyglot without provider options in Tell', function (string $connection, string $model): void {
     $factory = tellTestFactory(credentials: [
         'DEEPSEEK_API_KEY' => 'tell-test-key',
         'QWEN_API_KEY' => 'tell-test-key',
     ]);
-    $project = tellLastTemporaryRoot().'/translation-project';
+    $project = tellLastTemporaryRoot() . '/translation-project';
     mkdir($project, 0700, true);
-    $definition = $factory->definition(new TellOptions(
+    $options = new TellOptions(
         prompt: 'Translate only.',
         directory: $project,
         connection: $connection,
         model: $model,
-        reasoningEffort: TellReasoningEffort::Low,
+        reasoningEffort: ReasoningEffort::Low,
         connectionExplicit: true,
         modelExplicit: true,
         reasoningEffortExplicit: true,
-    ));
+    );
+    $definition = $factory->definition($options);
+    $loop = $factory->build($options, $definition);
+    $driver = $loop->driver();
 
-    expect($definition->llmConfig?->options)->toMatchArray($expected);
+    expect($definition->llmConfig?->options)->not()->toHaveKeys([
+        'thinking',
+        'reasoning_effort',
+    ])->and($driver)->toBeInstanceOf(ToolCallingDriver::class)
+        ->and($driver->reasoning())->toEqual(
+            ReasoningSelection::effort(ReasoningEffort::Low),
+        );
 })->with([
-    'DeepSeek V4' => ['deepseek', 'deepseek-v4-pro', [
-        'thinking' => ['type' => 'enabled'],
-        'reasoning_effort' => 'low',
-    ]],
-    'Qwen 3' => ['qwen', 'qwen3.8-max', [
-        'thinking' => true,
-        'reasoning_effort' => 'low',
-    ]],
+    'DeepSeek V4' => ['deepseek', 'deepseek-v4-pro'],
+    'Qwen 3' => ['qwen', 'qwen3.8-max'],
 ]);
 
 it('rejects invalid branch values and unsupported models before fake inference', function (): void {
@@ -111,11 +116,11 @@ it('rejects invalid branch values and unsupported models before fake inference',
         ->toThrow(InvalidArgumentException::class, 'low, medium, high')
         ->and($configuration->show()->version)->toBe(0)
         ->and(fn () => (new TellOptions(prompt: 'invalid', directory: $project))
-        ->withBranchConfig(['reasoningEffort' => 'unbounded']))
+            ->withBranchConfig(['reasoningEffort' => 'unbounded']))
         ->toThrow(InvalidArgumentException::class, 'low, medium, high')
         ->and(fn () => $tell->run(
             TellRequest::prompt('Do not call the driver.')
-                ->reasoningEffort(TellReasoningEffort::Low),
+                ->reasoningEffort(ReasoningEffort::Low),
         ))
         ->toThrow(InvalidArgumentException::class, 'not supported');
 });

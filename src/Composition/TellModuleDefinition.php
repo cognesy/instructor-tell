@@ -14,10 +14,10 @@ final readonly class TellModuleDefinition
     private Closure $factory;
 
     /**
-     * @param list<class-string> $provides
-     * @param list<class-string> $requires
-     * @param list<class-string> $optional
-     * @param callable(mixed ...): object $factory
+     * @param  list<class-string>  $provides
+     * @param  list<class-string>  $requires
+     * @param  list<class-string>  $optional
+     * @param  callable(mixed ...): object  $factory
      */
     public function __construct(
         public string $id,
@@ -37,14 +37,12 @@ final readonly class TellModuleDefinition
     }
 
     /** @param list<object|null> $dependencies */
-    public function create(array $dependencies): object
-    {
+    public function create(array $dependencies): object {
         return ($this->factory)(...$dependencies);
     }
 
     /** @return array{id: string, description: string, provides: list<class-string>, requires: list<class-string>, optional: list<class-string>} */
-    public function describe(): array
-    {
+    public function describe(): array {
         return [
             'id' => $this->id,
             'description' => $this->description,

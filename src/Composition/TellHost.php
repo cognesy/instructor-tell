@@ -5,10 +5,8 @@ declare(strict_types=1);
 namespace Cognesy\Tell\Composition;
 
 use Cognesy\Agents\Capability\Cancellation\CanProvideCancellationSignal;
-use Cognesy\Tell\Composition\TellHostDescription;
-use Cognesy\Tell\Composition\TellHostDisposedException;
-use Cognesy\Tell\Composition\TellHostDisposalException;
-use Cognesy\Tell\Composition\TellModuleCleanup;
+use Cognesy\Agents\Drivers\CanUseTools;
+use Cognesy\Tell\Configuration\TellPaths;
 use Cognesy\Tell\Contracts\CanAccessTellConversations;
 use Cognesy\Tell\Contracts\CanBuildTellAgent;
 use Cognesy\Tell\Contracts\CanBuildTellApplication;
@@ -26,10 +24,9 @@ use Cognesy\Tell\Contracts\CanResolveTellPaths;
 use Cognesy\Tell\Contracts\CanResolveTellSecrets;
 use Cognesy\Tell\Contracts\CanRunTell;
 use Cognesy\Tell\Contracts\CanRunTellProtocol;
+use Cognesy\Tell\Data\TellHostDescription;
 use Cognesy\Tell\Runtime\CanReadTellClock;
-use Cognesy\Tell\Composition\StandardTellProfile;
 use Cognesy\Tell\Runtime\TellAgentFactory;
-use Cognesy\Tell\Runtime\TellPaths;
 use LogicException;
 
 /** Booted static capability host with named accessors and explicit ownership. */
@@ -38,8 +35,9 @@ final class TellHost
     private bool $disposed = false;
 
     /**
-     * @param array<class-string, list<object>> $providers
-     * @param list<array{id: string, instance: object}> $constructed
+     * @param  array<class-string, list<object>>  $providers
+     * @param  list<array{id: string, instance: object}>  $constructed
+     *
      * @internal Construct through TellHostBuilder.
      */
     public function __construct(
@@ -48,7 +46,7 @@ final class TellHost
         private readonly TellHostDescription $description,
     ) {}
 
-    /** @param callable(): \Cognesy\Agents\Drivers\CanUseTools|null $driverFactory */
+    /** @param callable(): CanUseTools|null $driverFactory */
     public static function standard(
         ?string $directory = null,
         ?TellPaths $paths = null,
@@ -68,113 +66,92 @@ final class TellHost
         ));
     }
 
-    public function runner(): CanRunTell
-    {
+    public function runner(): CanRunTell {
         return $this->singleton(CanRunTell::class);
     }
 
-    public function agents(): CanBuildTellAgent
-    {
+    public function agents(): CanBuildTellAgent {
         return $this->singleton(CanBuildTellAgent::class);
     }
 
-    public function model(): CanResolveTellModel
-    {
+    public function model(): CanResolveTellModel {
         return $this->singleton(CanResolveTellModel::class);
     }
 
-    public function secrets(): CanResolveTellSecrets
-    {
+    public function secrets(): CanResolveTellSecrets {
         return $this->singleton(CanResolveTellSecrets::class);
     }
 
-    public function workspace(): CanManageTellWorkspace
-    {
+    public function workspace(): CanManageTellWorkspace {
         return $this->singleton(CanManageTellWorkspace::class);
     }
 
-    public function conversations(): CanAccessTellConversations
-    {
+    public function conversations(): CanAccessTellConversations {
         return $this->singleton(CanAccessTellConversations::class);
     }
 
-    public function branchConfiguration(): ?CanReadTellBranchConfiguration
-    {
+    public function branchConfiguration(): ?CanReadTellBranchConfiguration {
         return $this->optionalSingleton(CanReadTellBranchConfiguration::class);
     }
 
-    public function configuration(): CanResolveTellConfiguration
-    {
+    public function configuration(): CanResolveTellConfiguration {
         return $this->singleton(CanResolveTellConfiguration::class);
     }
 
-    public function paths(): CanResolveTellPaths
-    {
+    public function paths(): CanResolveTellPaths {
         return $this->singleton(CanResolveTellPaths::class);
     }
 
-    public function extensions(): CanCatalogueTellExtensions
-    {
+    public function extensions(): CanCatalogueTellExtensions {
         return $this->singleton(CanCatalogueTellExtensions::class);
     }
 
     /** @return list<CanContributeTellExtensions> */
-    public function extensionContributors(): array
-    {
+    public function extensionContributors(): array {
         return $this->contributors(CanContributeTellExtensions::class);
     }
 
     /** @return list<CanContributeTellTools> */
-    public function toolContributors(): array
-    {
+    public function toolContributors(): array {
         return $this->contributors(CanContributeTellTools::class);
     }
 
-    public function tools(): CanDispatchTellTool
-    {
+    public function tools(): CanDispatchTellTool {
         return $this->singleton(CanDispatchTellTool::class);
     }
 
-    public function observer(): CanObserveTellExecution
-    {
+    public function observer(): CanObserveTellExecution {
         return $this->singleton(CanObserveTellExecution::class);
     }
 
     /** @return list<CanContributeTellCommands> */
-    public function commandContributors(): array
-    {
+    public function commandContributors(): array {
         return $this->contributors(CanContributeTellCommands::class);
     }
 
-    public function application(): CanBuildTellApplication
-    {
+    public function application(): CanBuildTellApplication {
         return $this->singleton(CanBuildTellApplication::class);
     }
 
-    public function protocol(): CanRunTellProtocol
-    {
+    public function protocol(): CanRunTellProtocol {
         return $this->singleton(CanRunTellProtocol::class);
     }
 
-    public function cancellation(): CanProvideCancellationSignal
-    {
+    public function cancellation(): CanProvideCancellationSignal {
         return $this->singleton(CanProvideCancellationSignal::class);
     }
 
-    public function clock(): CanReadTellClock
-    {
+    public function clock(): CanReadTellClock {
         return $this->singleton(CanReadTellClock::class);
     }
 
-    public function describe(): TellHostDescription
-    {
+    public function describe(): TellHostDescription {
         $this->assertActive();
 
         return $this->description;
     }
 
-    public function dispose(): void
-    {
+    public function dispose(): void {
         if ($this->disposed) {
             return;
         }
@@ -187,14 +164,14 @@ final class TellHost
 
     /**
      * @template T of object
-     * @param class-string<T> $capability
+     *
+     * @param  class-string<T>  $capability
      * @return T
      */
-    private function singleton(string $capability): object
-    {
+    private function singleton(string $capability): object {
         $this->assertActive();
         $provider = $this->providers[$capability][0] ?? null;
-        if (! $provider instanceof $capability) {
+        if (!$provider instanceof $capability) {
             throw new LogicException("Tell host does not provide {$capability}.");
         }
 
@@ -203,14 +180,14 @@ final class TellHost
 
     /**
      * @template T of object
-     * @param class-string<T> $capability
+     *
+     * @param  class-string<T>  $capability
      * @return T|null
      */
-    private function optionalSingleton(string $capability): ?object
-    {
+    private function optionalSingleton(string $capability): ?object {
         $this->assertActive();
         $provider = $this->providers[$capability][0] ?? null;
-        if ($provider !== null && ! $provider instanceof $capability) {
+        if ($provider !== null && !$provider instanceof $capability) {
             throw new LogicException("Tell host has an invalid provider for {$capability}.");
         }
 
@@ -219,15 +196,15 @@ final class TellHost
 
     /**
      * @template T of object
-     * @param class-string<T> $capability
+     *
+     * @param  class-string<T>  $capability
      * @return list<T>
      */
-    private function contributors(string $capability): array
-    {
+    private function contributors(string $capability): array {
         $this->assertActive();
         $providers = $this->providers[$capability] ?? [];
         foreach ($providers as $provider) {
-            if (! $provider instanceof $capability) {
+            if (!$provider instanceof $capability) {
                 throw new LogicException("Tell host has an invalid contributor for {$capability}.");
             }
         }
@@ -235,10 +212,9 @@ final class TellHost
         return $providers;
     }
 
-    private function assertActive(): void
-    {
+    private function assertActive(): void {
         if ($this->disposed) {
-            throw new TellHostDisposedException;
+            throw new TellHostDisposedException();
         }
     }
 }
