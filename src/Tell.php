@@ -5,58 +5,32 @@ declare(strict_types=1);
 namespace Cognesy\Tell;
 
 use Cognesy\Agents\Capability\Cancellation\CanProvideCancellationSignal;
-use Cognesy\Tell\Composition\TellHost;
+use Cognesy\Tell\Core\Contract\Discovery\CanCatalogueTellProviders;
+use Cognesy\Tell\Core\Contract\Execution\CanObserveTellRun;
+use Cognesy\Tell\Core\Contract\Tool\CanDispatchTellTool;
+use Cognesy\Tell\Core\Contract\Workspace\CanAccessTellConversations;
+use Cognesy\Tell\Core\Contract\Workspace\CanManageTellWorkspace;
+use Cognesy\Tell\Core\Contract\Workspace\CanUseTellConversation;
+use Cognesy\Tell\Core\Discovery\TellCatalogue;
+use Cognesy\Tell\Core\Execution\TellRuntimeFactory;
+use Cognesy\Tell\Core\Tool\TellTools;
+use Cognesy\Tell\Core\Workspace\TellWorkspace;
 use Cognesy\Tell\Data\TellProgress;
 use Cognesy\Tell\Data\TellRequest;
 use Cognesy\Tell\Data\TellResult;
-use Cognesy\Tell\Discovery\TellCatalogue;
-use Cognesy\Tell\Runtime\TellAgentFactory;
-use Cognesy\Tell\Runtime\TellRun;
-use Cognesy\Tell\Testing\TellTestFactory;
-use Cognesy\Tell\Tool\TellTools;
-use Cognesy\Tell\Workspace\TellConversation;
-use Cognesy\Tell\Workspace\TellWorkspace;
 use Generator;
 
 final readonly class Tell
 {
-    private function __construct(
+    public function __construct(
         private string $directory,
-        private TellAgentFactory $agents,
-        private TellHost $host,
+        private TellRuntimeFactory $runtimeFactory,
+        private CanManageTellWorkspace $workspaces,
+        private CanAccessTellConversations $conversations,
+        private CanCatalogueTellProviders $providerCatalogue,
+        private CanDispatchTellTool $toolDispatcher,
         private ?CanProvideCancellationSignal $cancellation,
     ) {}
-
-    public static function open(
-        string $directory,
-        ?TellAgentFactory $agents = null,
-        ?CanProvideCancellationSignal $cancellation = null,
-    ): self {
-        $agents ??= TellAgentFactory::installed();
-        $host = TellHost::standard(
-            directory: $directory,
-            paths: $agents->paths(),
-            agentFactory: $agents,
-            cancellation: $cancellation,
-        )->boot();
-
-        return new self(
-            directory: $directory,
-            agents: $agents,
-            host: $host,
-            cancellation: $cancellation,
-        );
-    }
-
-    /**
-     * Open Tell with deterministic, in-process model responses.
-     *
-     * No network request or real provider credential is used. For scripted
-     * tool, failure, or usage steps, use TellTestFactory directly.
-     */
-    public static function testing(string $directory, string ...$responses): self {
-        return TellTestFactory::responses(...$responses)->open($directory);
-    }
 
     public function run(TellRequest $request): TellResult {
         $request = match ($request->directory) {
@@ -64,7 +38,7 @@ final readonly class Tell
             default => $request,
         };
 
-        return $this->host->runner()->run($request);
+        return $this->runtimeFactory->create()->run($request);
     }
 
     /**
@@ -76,51 +50,43 @@ final readonly class Tell
             default => $request,
         };
 
-        return $this->host->runner()->stream($request);
+        return $this->runtimeFactory->create()->stream($request);
     }
 
     /**
      * Starts a run and hands back a handle. Prefer this over runStream() when
      * you may stop consuming checkpoints early: the handle still carries the
-     * result, and a run torn down before it committed is reported.
+     * result, and a run torn down before settlement is reported.
      */
-    public function start(TellRequest $request): TellRun {
+    public function start(TellRequest $request): CanObserveTellRun {
         $request = match ($request->directory) {
             '' => $request->withDirectory($this->directory),
             default => $request,
         };
 
-        return $this->host->runner()->start($request);
+        return $this->runtimeFactory->create()->start($request);
     }
 
     public function workspace(): TellWorkspace {
         return new TellWorkspace(
-            $this->agents,
             $this->directory,
-            $this->host->workspace(),
-            $this->host->conversations(),
+            $this->workspaces,
+            $this->conversations,
         );
     }
 
-    public function conversation(string $name): TellConversation {
+    public function conversation(string $name): CanUseTellConversation {
         return $this->workspace()->conversation($name);
     }
 
     public function catalogue(): TellCatalogue {
-        return new TellCatalogue($this->agents, $this->directory);
+        return new TellCatalogue(
+            $this->providerCatalogue,
+            $this->directory,
+        );
     }
 
     public function tools(): TellTools {
-        return TellTools::controlled($this->host->tools(), $this->cancellation);
-    }
-
-    /** Explicit control surface for inspection and host-owned capabilities. */
-    public function host(): TellHost {
-        return $this->host;
-    }
-
-    /** Release host-owned resources. Safe to call more than once. */
-    public function dispose(): void {
-        $this->host->dispose();
+        return new TellTools($this->toolDispatcher, $this->cancellation);
     }
 }

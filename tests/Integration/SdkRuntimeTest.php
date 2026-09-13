@@ -9,21 +9,20 @@ use Cognesy\Agents\Session\Data\SessionId;
 use Cognesy\Tell\Data\TellEventEnvelope;
 use Cognesy\Tell\Data\TellExecutionMode;
 use Cognesy\Tell\Data\TellRequest;
-use Cognesy\Tell\Tell;
-use Cognesy\Tell\Workspace\Arena\FilesystemArena;
-use Cognesy\Tell\Workspace\Session\SessionRef;
+use Cognesy\Tell\Capability\Workspace\Filesystem\FilesystemArena;
+use Cognesy\Tell\Core\Workspace\Session\SessionRef;
 
 it('runs an SDK request statelessly by default', function (): void {
     $factory = tellTestFactory(static fn ($loop) => $loop->withDriver(FakeAgentDriver::fromResponses('SDK answer')));
     $project = tellLastTemporaryRoot() . '/project';
     mkdir($project, 0755, true);
 
-    $result = Tell::open($project, $factory)->run(TellRequest::prompt('What changed?'));
+    $result = tellTestOpen($project, $factory)->run(TellRequest::prompt('What changed?'));
 
     expect($result->isCompleted())->toBeTrue()
         ->and($result->text())->toBe("SDK answer\n")
         ->and($result->isTransient())->toBeFalse()
-        ->and($result->isDurable())->toBeFalse()
+        ->and($result->isPublished())->toBeFalse()
         ->and(is_dir($project . '/.tell'))->toBeFalse();
 });
 
@@ -31,14 +30,14 @@ it('runs an SDK durable request through the workspace turn path', function (): v
     $factory = tellTestFactory(static fn ($loop) => $loop->withDriver(FakeAgentDriver::fromResponses('durable answer')));
     $project = tellLastTemporaryRoot() . '/project';
     mkdir($project, 0755, true);
-    $workspace = $factory->workspace()->initialize($project)->workspace;
+    $workspace = tellTestWorkspaces()->initialize($project)->workspace;
 
-    $result = Tell::open($project, $factory)->run(
+    $result = tellTestOpen($project, $factory)->run(
         TellRequest::prompt('Remember this')->durable(),
     );
 
     expect($result->isCompleted())->toBeTrue()
-        ->and($result->isDurable())->toBeTrue()
+        ->and($result->isPublished())->toBeTrue()
         ->and($result->workspace())->toBe($workspace->paths->root)
         ->and((new FilesystemArena($workspace))->readRef()->head)->not->toBeNull();
 });
@@ -47,14 +46,14 @@ it('runs an SDK named conversation through the workspace session path', function
     $factory = tellTestFactory(static fn ($loop) => $loop->withDriver(FakeAgentDriver::fromResponses('session answer')));
     $project = tellLastTemporaryRoot() . '/project';
     mkdir($project, 0755, true);
-    $workspace = $factory->workspace()->initialize($project)->workspace;
+    $workspace = tellTestWorkspaces()->initialize($project)->workspace;
 
-    $result = Tell::open($project, $factory)->run(
+    $result = tellTestOpen($project, $factory)->run(
         TellRequest::prompt('Continue')->durable('review'),
     );
 
     expect($result->isCompleted())->toBeTrue()
-        ->and($result->isDurable())->toBeTrue()
+        ->and($result->isPublished())->toBeTrue()
         ->and($result->session())->toBe('review')
         ->and((new FilesystemArena($workspace))->readOptionalRef(
             (new SessionRef(SessionId::from('review')))->refName(),
@@ -65,8 +64,8 @@ it('runs a transient SDK request against workspace context without publishing', 
     $factory = tellTestFactory(static fn ($loop) => $loop->withDriver(FakeAgentDriver::fromResponses('transient answer')));
     $project = tellLastTemporaryRoot() . '/project';
     mkdir($project, 0755, true);
-    $workspace = $factory->workspace()->initialize($project)->workspace;
-    $tell = Tell::open($project, $factory);
+    $workspace = tellTestWorkspaces()->initialize($project)->workspace;
+    $tell = tellTestOpen($project, $factory);
     $tell->run(TellRequest::prompt('Persist this')->durable());
     $before = (new FilesystemArena($workspace))->readRef()->toBytes();
 
@@ -75,7 +74,7 @@ it('runs a transient SDK request against workspace context without publishing', 
 
     expect($result->isCompleted())->toBeTrue()
         ->and($result->isTransient())->toBeTrue()
-        ->and($result->isDurable())->toBeFalse()
+        ->and($result->isPublished())->toBeFalse()
         ->and($after)->toBe($before);
 });
 
@@ -83,10 +82,10 @@ it('observes typed lifecycle events in agent source order', function (): void {
     $factory = tellTestFactory(static fn ($loop) => $loop->withDriver(FakeAgentDriver::fromResponses('observed answer')));
     $project = tellLastTemporaryRoot() . '/project';
     mkdir($project, 0755, true);
-    $factory->workspace()->initialize($project);
+    tellTestWorkspaces()->initialize($project);
     $events = [];
 
-    Tell::open($project, $factory)->run(
+    tellTestOpen($project, $factory)->run(
         TellRequest::prompt('Observe this')->durable()->onEvent(static function (TellEventEnvelope $event) use (&$events): void {
             $events[] = $event;
         }),
@@ -95,20 +94,20 @@ it('observes typed lifecycle events in agent source order', function (): void {
     $types = array_map(static fn (TellEventEnvelope $event): string => $event->kind, $events);
     $started = array_search('execution.started', $types, true);
     $step = array_search('step.completed', $types, true);
-    $completed = array_search('execution.completed', $types, true);
+    $completed = array_search('execution.settled', $types, true);
     if (!is_int($started) || !is_int($step) || !is_int($completed)) {
         throw new RuntimeException('Expected complete Tell event lifecycle.');
     }
     expect($types)->toContain('execution.started')
         ->toContain('step.started')
         ->toContain('step.completed')
-        ->toContain('execution.completed')
+        ->toContain('execution.settled')
         ->and($started)->toBeLessThan($step)
         ->and($step)->toBeLessThan($completed)
         ->and($events[0]->agent)->toBe('default')
         ->and($events[0]->mode)->toBe(TellExecutionMode::Durable)
         ->and($events[0]->branch)->toBe('main')
-        ->and($events[0]->toArray()['schema'])->toBe('tell.event.v1');
+        ->and($events[0]->toArray()['schema'])->toBe('tell.event.v2');
 });
 
 it('streams each completed checkpoint and returns the final result', function (): void {
@@ -116,7 +115,7 @@ it('streams each completed checkpoint and returns the final result', function ()
     $project = tellLastTemporaryRoot() . '/project';
     mkdir($project, 0755, true);
 
-    $stream = Tell::open($project, $factory)->runStream(TellRequest::prompt('Stream this'));
+    $stream = tellTestOpen($project, $factory)->runStream(TellRequest::prompt('Stream this'));
     $progress = iterator_to_array($stream);
     $result = $stream->getReturn();
 
@@ -131,9 +130,9 @@ it('has already published once a durable stream shows its terminal checkpoint', 
     $factory = tellTestFactory(static fn ($loop) => $loop->withDriver(FakeAgentDriver::fromResponses('published answer')));
     $project = tellLastTemporaryRoot() . '/project';
     mkdir($project, 0755, true);
-    $workspace = $factory->workspace()->initialize($project)->workspace;
+    $workspace = tellTestWorkspaces()->initialize($project)->workspace;
 
-    $stream = Tell::open($project, $factory)->runStream(
+    $stream = tellTestOpen($project, $factory)->runStream(
         TellRequest::prompt('Commit before the terminal yield')->durable(),
     );
     // Observing the terminal checkpoint implies the turn is durable: the commit
@@ -155,9 +154,9 @@ it('does not publish a durable workspace turn when an observation listener fails
     $factory = tellTestFactory(static fn ($loop) => $loop->withDriver(FakeAgentDriver::fromResponses('should not persist')));
     $project = tellLastTemporaryRoot() . '/project';
     mkdir($project, 0755, true);
-    $workspace = $factory->workspace()->initialize($project)->workspace;
+    $workspace = tellTestWorkspaces()->initialize($project)->workspace;
 
-    expect(static fn () => Tell::open($project, $factory)->run(
+    expect(static fn () => tellTestOpen($project, $factory)->run(
         TellRequest::prompt('Fail during observation')
             ->durable()
             ->onEvent(static fn (TellEventEnvelope $event) => throw new RuntimeException('observer failed')),
@@ -169,7 +168,7 @@ it('controls an initialized workspace and named conversation without exposing ar
     $factory = tellTestFactory(static fn ($loop) => $loop->withDriver(FakeAgentDriver::fromResponses('conversation answer', 'compacted answer')));
     $project = tellLastTemporaryRoot() . '/project';
     mkdir($project, 0755, true);
-    $tell = Tell::open($project, $factory);
+    $tell = tellTestOpen($project, $factory);
 
     $workspace = $tell->workspace()->initialize();
     $conversation = $tell->conversation('release-review');
@@ -181,7 +180,7 @@ it('controls an initialized workspace and named conversation without exposing ar
     $cleared = $conversation->clear();
 
     expect($workspace->created)->toBeTrue()
-        ->and($send->isDurable())->toBeTrue()
+        ->and($send->isPublished())->toBeTrue()
         ->and($send->session())->toBe('release-review')
         ->and($history->selector)->toBe(['type' => 'session', 'name' => 'release-review'])
         ->and($history->turns)->toHaveCount(1)

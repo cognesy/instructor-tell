@@ -4,22 +4,17 @@ declare(strict_types=1);
 
 require_once dirname(__DIR__) . '/Pest.php';
 
-use Cognesy\Agents\Data\AgentState;
 use Cognesy\Agents\Drivers\Testing\FakeAgentDriver;
 use Cognesy\Agents\Drivers\Testing\ScenarioStep;
-use Cognesy\Tell\Console\TellApplication;
-use Cognesy\Tell\Console\TellCommand;
-use Cognesy\Tell\Console\TellOptions;
-use Cognesy\Tell\Observability\TellEventNormalizer;
-use Cognesy\Tell\Render\EventsRenderer;
+use Cognesy\Tell\Adapter\Console\Symfony\TellCommand;
+use Cognesy\Tell\Core\Observation\TellEventNormalizer;
 use HelgeSverre\Toon\Toon;
-use Symfony\Component\Console\Output\BufferedOutput;
 use Symfony\Component\Console\Tester\ApplicationTester;
 use Symfony\Component\Console\Tester\CommandTester;
 
 it('selects text, json, and event renderers deterministically', function (string $mode): void {
     $factory = tellTestFactory(static fn ($loop) => $loop->withDriver(FakeAgentDriver::fromResponses('rendered answer')));
-    $tester = new CommandTester(new TellCommand($factory));
+    $tester = new CommandTester(tellTestCommand($factory));
     $status = $tester->execute(
         ['prompt' => 'hello', '--output' => $mode],
         ['capture_stderr_separately' => true],
@@ -35,27 +30,25 @@ it('selects text, json, and event renderers deterministically', function (string
             ->and(array_map(
                 static fn (string $line): string => json_decode($line, true, flags: JSON_THROW_ON_ERROR)['kind'],
                 $lines,
-            ))->toContain('execution.completed'),
+            ))->toContain('execution.settled'),
         default => expect(trim($tester->getDisplay()))->toBe('rendered answer'),
     };
 })->with(['toon', 'text', 'json', 'events']);
 
 it('emits a monotonic, versioned, payload-free NDJSON sequence', function (): void {
     $factory = tellTestFactory(static fn ($loop) => $loop->withDriver(FakeAgentDriver::fromResponses('done')));
-    $options = new TellOptions(prompt: 'events', directory: tellLastTemporaryRoot());
-    $loop = $factory->build($options);
-    $output = new BufferedOutput();
-    (new EventsRenderer($output))->attach($loop);
-    $loop->execute(AgentState::empty()->withUserMessage('events'));
+    $tester = new CommandTester(tellTestCommand($factory));
+    $tester->execute(['prompt' => 'events', '--output' => 'events']);
     $rendered = array_map(
         static fn (string $line): array => json_decode($line, true, flags: JSON_THROW_ON_ERROR),
-        array_values(array_filter(explode("\n", trim($output->fetch())))),
+        array_values(array_filter(explode("\n", trim($tester->getDisplay())))),
     );
 
     expect($rendered)->not->toBeEmpty()
-        ->and(array_column($rendered, 'schema'))->each->toBe('tell.event.v1')
+        ->and(array_column($rendered, 'schema'))->each->toBe('tell.event.v2')
         ->and(array_column($rendered, 'sequence'))->toBe(range(1, count($rendered)))
         ->and(array_filter($rendered, static fn (array $event): bool => $event['terminal'] !== null))->toHaveCount(1)
+        ->and($rendered[array_key_last($rendered)]['metadata']['publication'])->toBe('not_applicable')
         ->and(json_encode($rendered, JSON_THROW_ON_ERROR))->not->toContain('events');
 
     $unknown = (new TellEventNormalizer())->normalize(new stdClass());
@@ -70,7 +63,7 @@ it('keeps quiet output final-only and makes machine tool progress explicit', fun
     ]);
     $factory = tellTestFactory(static fn ($loop) => $loop->withDriver($driver));
 
-    $quietApplication = new TellApplication($factory);
+    $quietApplication = tellTestApplication($factory);
     $quietApplication->setAutoExit(false);
     $quiet = new ApplicationTester($quietApplication);
     $quiet->run(
@@ -80,7 +73,7 @@ it('keeps quiet output final-only and makes machine tool progress explicit', fun
     expect(Toon::decode($quiet->getDisplay())['answer'])->toBe('tool answer')
         ->and($quiet->getErrorOutput())->toBe('');
 
-    $debugApplication = new TellApplication($factory);
+    $debugApplication = tellTestApplication($factory);
     $debugApplication->setAutoExit(false);
     $debug = new ApplicationTester($debugApplication);
     $debug->run(
@@ -96,7 +89,7 @@ it('answers a bare invocation as prose, because the default format is for a pers
     $factory = tellTestFactory(static fn ($loop) => $loop->withDriver(
         new FakeAgentDriver([ScenarioStep::final('plain answer')]),
     ));
-    $application = new TellApplication($factory);
+    $application = tellTestApplication($factory);
     $application->setAutoExit(false);
     $tester = new ApplicationTester($application);
 

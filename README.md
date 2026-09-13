@@ -1,19 +1,16 @@
 # Instructor Tell
 
-The supported SDK, CLI, persistence, event, trace, and exit contracts are
-tracked in [COMPATIBILITY.md](COMPATIBILITY.md).
-
 Cold-start and discovery-scan budgets are tracked in
 [STARTUP_BASELINE.md](STARTUP_BASELINE.md).
 
-The static host primitive and rejected Context/Layer adapter are documented in
-[STATIC_COMPOSITION_DECISION.md](STATIC_COMPOSITION_DECISION.md).
-
-Application replacement seams and their dependency rules are documented in
-[CONTRACTS.md](CONTRACTS.md).
-
-The minimal factory-backed composition boundary is documented in
-[HOST.md](HOST.md).
+Tell core is framework-neutral. `StandaloneTellBuilder` is the one standard
+composition entry point for both the PHP SDK and CLI. It uses a fresh private
+synchronous container to select providers, then returns a typed `Tell` or
+`TellConsoleApplication` root. Execution follows the concrete
+`Tell` → `TellRuntimeFactory` → `TellRuntime` path: the factory owns fresh-run
+construction and request-scoped cancellation overrides. Runtime collaborators
+receive focused contracts, never a container or provider registry. The CLI adds
+Symfony Console only at its adapter edge.
 
 `tell` is a small, non-interactive reference frontend for `cognesy/agents`.
 It loads an agent template, builds the runtime through public APIs, and follows
@@ -24,7 +21,6 @@ tell
 tell "summarize this repository"
 tell describe --json
 tell auth status openai
-tell planes --full
 tell tools --fields=name,description,deferred
 tell agents
 tell sessions
@@ -41,7 +37,11 @@ turn stays the plain Markdown the model wrote and remains usable as input to
 something else. Use `--output=toon` for TOON, `--output=text` for the raw final
 answer undecorated, `--output=json` for JSON terminal state, or
 `--output=events` for a payload-free NDJSON stream using the versioned
-`tell.event.v1` envelope.
+`tell.event.v2` envelope. Use `tell runs list` and `tell runs show <execution-id>`
+to inspect settled or abandoned executions from the semantic journal. Run lists
+can filter by status, reason, agent, session, branch, workspace, and timestamp;
+trace detail reports missing, disabled, failed, clean, or corrupt evidence
+without repairing or rewriting it.
 List commands accept `--fields` for a smaller schema; session detail is
 bounded unless `tell sessions show ID --full` is requested.
 
@@ -60,10 +60,10 @@ worker, HTTP stream, or UI needs completed tool/inference checkpoints without
 parsing terminal output.
 
 ```php
-use Cognesy\Tell\Tell;
+use Cognesy\Tell\Composition\Standalone\StandaloneTellBuilder;
 use Cognesy\Tell\Data\TellRequest;
 
-$tell = Tell::open(__DIR__);
+$tell = StandaloneTellBuilder::in(__DIR__)->build();
 
 $result = $tell->run(
     TellRequest::prompt('Summarize the release risks')
@@ -80,9 +80,48 @@ foreach ($tell->runStream(
 ```
 
 Consume the stream to completion before reading its `TellResult` via
-`Generator::getReturn()`. A durable streamed turn publishes only after this
-successful completion; abandoning the generator leaves its selected ref
-unchanged.
+`Generator::getReturn()`, or use `TellRuntime::start()` when an early-breaking
+consumer needs the run handle. A completed durable checkpoint is published
+before it is yielded. Stopped and failed runs settle as inspectable results with
+`publication.status: not_attempted`; abandoning before settlement leaves its
+selected ref unchanged.
+
+`TellResult` separates requested/effective execution mode from achieved
+publication. Use `termination()` for status, reason, source, limits, usage, and
+public-safe errors; use `publication()` or `isPublished()` for Arena durability;
+and use `trace()` for local trace availability. There is no `isDurable()`
+shortcut because a durable request can stop without publishing.
+
+### Configuring composition
+
+Apply supported replacements through the builder's explicit typed methods before
+`build()`:
+
+```php
+use Cognesy\Tell\Composition\Standalone\StandaloneTellBuilder;
+$tell = StandaloneTellBuilder::in(__DIR__)
+    ->withObserver($observer)
+    ->withModelResolver($modelResolver)
+    ->withWorkspace($workspace)
+    ->withAgentContribution($contribution)
+    ->build();
+```
+
+`withAgentContributions()` replaces the complete ordered contribution set.
+`withCommand()` adds a Symfony command before `buildCli()`. The builder exposes
+neither arbitrary container bindings nor service lookup and is single-use after
+either root is resolved.
+
+The supported replacement points are deliberately named: driver factory, agent
+builder, cancellation source, model resolver, observer, workspace, agent
+contributions, and CLI commands. Adding another replacement point is an API
+decision rather than an arbitrary container-key binding.
+
+Create a fresh builder for every Tell instance. Defaults, replacements,
+factories, and mutable services are instance-owned; there is no static registry
+or fiber-local container. Resolution is synchronous and completes before the
+returned root is used, so independently built instances can run in interleaved
+fibers without shared container state.
 
 Use workspace handles for intentional durable work. They return SDK values,
 never Arena infrastructure or storage records:
@@ -98,7 +137,7 @@ $history = $conversation->history(limit: 10);
 $conversation->clear();
 ```
 
-`TellEventEnvelope::toArray()` returns the same safe `tell.event.v1` projection
+`TellEventEnvelope::toArray()` returns the same safe `tell.event.v2` projection
 used by NDJSON and default traces. The envelope is all a listener gets: it holds
 scalars only, so there is no raw framework event behind it to serialize by
 accident. An application that deliberately needs the original typed Agent event
@@ -108,10 +147,12 @@ the event arrives as its own class rather than an untyped object.
 ### Deterministic SDK tests
 
 Applications can test Tell orchestration without HTTP calls or real provider
-credentials. The convenience API scripts final responses:
+credentials. The testing factory scripts final responses:
 
 ```php
-$result = Tell::testing($temporaryProject, 'scripted answer')->run(
+use Cognesy\Tell\Testing\TellTestFactory;
+
+$result = TellTestFactory::responses('scripted answer')->open($temporaryProject)->run(
     TellRequest::prompt('Exercise the integration.'),
 );
 ```
@@ -126,16 +167,17 @@ and own its cleanup.
 ## Host-scoped shell jobs
 
 Applications that need a background command can opt into a separate shell-job
-host. It is not booted by `Tell::open()`, the CLI, or the one-run protocol.
+host. It is not booted by `StandaloneTellBuilder::build()`, `buildCli()`, or the
+one-run protocol.
 Denial is the default, so the embedding boundary must explicitly supply an
 approval policy:
 
 ```php
 use Cognesy\Tell\Data\TellShellJobRequest;
-use Cognesy\Tell\Shell\TellShellJobApprovals;
-use Cognesy\Tell\Shell\TellShellJobHost;
+use Cognesy\Tell\Capability\ShellJob\Process\TellShellJobApprovals;
+use Cognesy\Tell\Composition\Standalone\Profile\ShellJob\StandardTellShellJobProfile;
 
-$host = TellShellJobHost::shellJobs(
+$host = StandardTellShellJobProfile::builder(
     project: __DIR__,
     approval: TellShellJobApprovals::allowAll(),
 )->boot();
@@ -201,7 +243,7 @@ select one `session` or `branch`. Unknown fields and schema versions are
 rejected before inference. The boundary deliberately accepts no DSN, raw
 provider options, credentials, headers, or pre-supplied `ask_user` answers.
 
-Stdout contains only newline-delimited `tell.agent.frame.v1` objects. Sequence
+Stdout contains only newline-delimited `tell.agent.frame.v2` objects. Sequence
 numbers start at one and increase monotonically. A run emits zero or more
 `progress` frames followed by exactly one terminal frame:
 
@@ -218,13 +260,11 @@ Each frame is capped at 1 MiB; terminal answers are UTF-8 safely capped at
 provider payloads, exception messages, credentials, and absolute workspace
 paths are not serialized. Bounded human diagnostics are written to stderr.
 
-Compatibility is schema-versioned, not inferred from the Tell package version.
-Within `v1`, existing fields and meanings remain stable and new optional fields
-may be added. Controllers must ignore unknown response fields but should reject
-an unknown `schema`. Any breaking request or frame change requires a new schema
-identifier and parallel support during a documented migration window. This is
-a one-run protocol—not a resident daemon, bidirectional JSON-RPC session, or
-pause/resume API. Cancellation uses the process signal/cooperative hook.
+The request is `tell.agent.request.v1` and the terminal/result projection is
+`tell.agent.frame.v2`. Unknown request schemas are rejected; Tell does not
+negotiate or serve parallel response versions. This is a one-run protocol—not a
+resident daemon, bidirectional JSON-RPC session, or pause/resume API.
+Cancellation uses the process signal/cooperative hook.
 
 ## Non-interactive questions
 
@@ -248,14 +288,14 @@ Answers are redacted from normalized events and default traces. A completed
 durable turn keeps the semantic tool result in its canonical history; a
 transient turn does not publish it.
 
-PHP callers provide the same bounded queue explicitly:
+PHP callers provide the same bounded immutable value explicitly:
 
 ```php
-use Cognesy\Tell\Capability\AskUser\TellAnswerQueue;
+use Cognesy\Tell\Data\TellAnswers;
 
 $request = TellRequest::prompt('Run the release check')
-    ->withAnswers(new TellAnswerQueue([
-        ['id' => 'target', 'value' => 'production', 'source' => 'cli'],
+    ->withAnswers(new TellAnswers([
+        ['id' => 'target', 'value' => 'production', 'source' => 'sdk'],
     ]));
 ```
 
@@ -368,8 +408,8 @@ resolves or displays credential material.
 
 ## Providers and models
 
-Tell reads connection presets and declared driver capability metadata from
-Polyglot; it does not keep a second provider table. These inspection commands
+Tell joins connection presets to Polyglot's exact-offering model catalog; it
+does not keep a second provider or model table. These inspection commands
 need neither credentials nor network access:
 
 ```bash
@@ -380,21 +420,30 @@ tell models qwen --json
 tell config effective --branch review --json
 ```
 
-`providers` lists the resolved connection precedence and its preset default
-model. `models` accepts either a provider or a connection name and lists only
-models explicitly declared by those presets. Full provider rows include known
-context and tool/structured-output metadata with source provenance. Metadata
-Polyglot does not declare—such as vision, thinking, or a full remote model
-catalogue—is returned as explicitly unknown with a reason, never inferred from
-model names. `config effective` reports the selected connection/model and their
-sources without resolving or displaying an API key.
+`providers` lists resolved connection precedence and joins each preset default
+to its exact model profile. `models` accepts either a provider or connection
+name and lists actual catalog offerings, including limits, modalities,
+capabilities, and provenance. Project
+`config/llm/models/<driver>/<model>.yaml` records override user
+`$TELL_HOME/config/models/<driver>/<model>.yaml` records, which override
+packaged records. Missing exact offerings remain explicitly unknown; Tell never
+infers facts from model names. Driver and model filename components are
+percent-encoded; each YAML document contains `schemaVersion: 1`, a data
+`version`, and a `profile` with the exact identity and facts. Tell reuses
+catalogs per target project.
+This is a connection and catalog metadata view: it does not inspect or infer
+offerings from an `InferenceDriverRegistry` customized inside another runtime.
+To expose a custom runtime route in Tell, configure its connection preset and,
+when metadata is wanted, provide its exact model record explicitly.
+`tell context` uses the same resolved profile for model
+capacity. `config effective` reports selection sources without resolving or
+displaying an API key.
 
 ## Coding tools and direct dispatch
 
 The default Tell agent exposes one bounded implementation for each canonical
 coding operation: `read_file`, `write_file`, `apply_patch`, and `shell`.
-Existing `read`, `write`, `edit`, and `bash` names remain compatibility aliases
-over those same operations and policy. `apply_patch` validates all hunks before
+There are no alternate tool names. `apply_patch` validates all hunks before
 writing, confines paths to the project, and never falls back to an arbitrary
 shell command.
 
@@ -447,8 +496,9 @@ tell --max-retries 2 --timeout-ms 60000 --max-output-chars 100000 \
 one non-success terminal event, and does not publish a durable branch head for
 the interrupted turn. This requires PHP's `pcntl` signal support; verbose CLI
 output reports when it is unavailable. SDK callers can instead provide their
-own public Agents cancellation source to `Tell::open()` for deterministic
-programmatic cancellation.
+own public Agents cancellation source and pass it to
+`StandaloneTellBuilder::withCancellation()` for deterministic programmatic
+cancellation.
 
 The same limits are available through `TellRequest` (`maxRetries()`,
 `timeoutMs()`, `maxOutputChars()`, `maxToolOutputChars()`, `maxToolCalls()`,
@@ -566,24 +616,25 @@ Transient execution compiles the same selected history as a durable turn but
 never writes canonical objects or refs, saves sessions, or changes
 configuration. It stays stateless outside a workspace.
 Text output states that nothing was persisted; JSON and TOON include
-`execution.mode: transient` and `execution.durable: false`; events retain the
-same normalized lifecycle envelope. Execution traces remain external
-observations under the normal trace privacy policy.
+`execution.mode: transient` and `publication.status: not_applicable`; events
+retain the same normalized lifecycle envelope. Execution traces remain
+external observations under the normal trace privacy policy.
 
-`execution.mode` reports what the turn actually persisted, so it has three
-values and is not a restatement of `--transient`:
+`execution.mode` reports the resolved execution path, while publication reports
+whether durable state was actually achieved:
 
 <!-- markdownlint-disable MD013 -->
-| `execution.mode` | `execution.durable` | Turn |
+| `execution.mode` | `publication.status` | Turn |
 | --- | --- | --- |
-| `durable` | `true` | Published an immutable arena turn, or saved a named session. |
-| `transient` | `false` | Ran with the workspace context but deliberately wrote no conversation or session state. |
-| `stateless` | `false` | Ran outside any initialized workspace with no named session, so there was nothing to publish. |
+| `durable` | `published` | Completed and published an immutable Arena turn. |
+| `durable` | `not_attempted` | Stopped or failed without moving the selected Arena ref. |
+| `transient` | `not_applicable` | Ran with workspace context but deliberately published no conversation state. |
+| `stateless` | `not_applicable` | Ran without an Arena publication target. |
 <!-- markdownlint-enable MD013 -->
 
-`stateless` is the default outside a `.tell/` project. Consumers that branch on
-`execution.mode` must accept all three values; `execution.durable` remains the
-single boolean answer to whether conversation state was written.
+`stateless` is the default outside a `.tell/` project. Consumers must not infer
+publication from mode; `publication.status` and `isPublished()` are the only
+answers to whether conversation state was written.
 
 Arena records contain semantic messages and tool-call/result
 relationships only. Provider requests and responses, credentials, headers,
@@ -627,10 +678,10 @@ abridging.
 [tool.start] name=shell step=1 args={"command":"vendor/bin/pest packages/tell"}
 [tool.complete] name=shell status=ok step=1 duration=812ms result={"success":true,…}
 [step.complete] step=1 toolCalls=yes errors=0 in=4210 out=318 finish=tool_calls
-[execution.complete] status=completed steps=2 in=4210 out=318
+[execution.settled] status=completed steps=2 in=4210 out=318
 ```
 
-Kinds and keys are the ones from the normalized `tell.event.v1` contract, so
+Kinds and keys are the ones from the normalized `tell.event.v2` contract, so
 the lines read against the same vocabulary as `--output=events`. `status` is
 `failed` whenever the call failed or the tool returned its own failure
 envelope. Payload values are always valid JSON and bounded to 512 bytes; an
@@ -668,7 +719,7 @@ unchanged.
 Both channels show tool arguments and results, which no other Tell surface
 does. That is what asking for them means, and it is why they exist only for
 the invocation that asked: they are never persisted, never enter the
-normalized `tell.event.v1` stream, and never reach an execution trace file.
+normalized `tell.event.v2` stream, and never reach an execution trace file.
 
 ## Local storage and execution traces
 
@@ -677,18 +728,22 @@ to override it; otherwise Tell uses `~/.tell` (`%USERPROFILE%\.tell` on Windows)
 
 ```text
 ~/.tell/
+├── .env
 ├── config/
 │   ├── tell.json
-│   ├── credentials.env
 │   ├── connections/
 │   └── agents/
 ├── runtime/
+│   ├── execution-journal.jsonl
 │   └── sessions/
 └── logs/
     ├── executions/YYYY-MM-DD/<execution-id>.jsonl
     └── sessions/<session-id>-<stable-hash>.jsonl
 ```
 
+The payload-free semantic execution journal is authoritative for settlement,
+abandonment, and run discovery. Traces are optional diagnostic projections and
+Arena records contain only successfully published conversation history.
 Stateless turns receive one trace file per execution. Every named conversation
 has a separate session trace; later turns append to the same file. JSONL writes
 use an exclusive file lock, so independently running sessions never share a
@@ -701,8 +756,8 @@ platforms that support POSIX permissions.
 Provider credentials resolve in a fixed order:
 
 1. the process environment,
-2. the selected workspace's `.env`,
-3. `~/.tell/config/credentials.env`.
+2. the nearest ancestor workspace's `.tell/.env`,
+3. the user profile's `~/.tell/.env`.
 
 The Tell credential store is optional and created only by an explicit `auth
 set`. It is written atomically with mode `0600` on POSIX systems. Values are
@@ -728,7 +783,7 @@ The resolver is injected through Instructor Config's `CanResolveSecrets`
 contract, leaving room for an OS-keychain source without changing connection
 files or the data-plane runtime.
 
-Each default trace line is the same payload-free `tell.event.v1` envelope as
+Each default trace line is the same payload-free `tell.event.v2` envelope as
 the NDJSON renderer: schema, stable kind, sequence, execution ID, selected
 branch/session, bounded public metadata, and one terminal status. Prompts,
 tool arguments/results, exception details, state snapshots, and provider
@@ -749,10 +804,13 @@ this optional configuration in `~/.tell/config/tell.json`:
 ```
 
 Unknown configuration keys and invalid values fail loudly before inference.
-Trace write failures are deliberately fail-open: the turn still runs and its
-normal stdout contract is unchanged. Tell does not rotate or upload logs; the
-directory is an external observability boundary for `tail`, `jq`, collectors,
-and operator-managed retention.
+Trace write failures are deliberately fail-open: the turn still runs, its
+result exposes `trace.status: failed`, and diagnostics include
+`trace_write_failed` without changing execution or publication. `tell runs
+list` reads only the semantic journal; `tell runs show` follows the exact trace
+reference for optional event detail and strips configured payloads unless
+`--full` is explicit. Tell does not rotate or upload logs; retention is an
+operator-managed boundary.
 
 Errors are structured data on stdout. Exit `0` means success, `1` means the
 requested execution failed, and `2` means invalid usage. Unknown flags fail
@@ -762,12 +820,3 @@ Tell deliberately does not install ambient editor/session hooks or inject a
 Tell-usage skill into agents. AXI is applied to the CLI contract only; adding
 self-integration here would create a recursive Tell-teaches-Tell layer with no
 workspace-state benefit.
-
-`tell planes` exposes the logical operational map for Tell's own runtime
-boundary. Agent turns are data-plane work; effective profile/tool resolution is
-control-plane work; credential and session lifecycle plus agent inventory are
-management-plane work. The data plane receives an already resolved LLM
-configuration and owns only its selected trace target, and a trace sink
-failure does not block inference. `--full` adds owned state, cross-plane
-inputs/outputs, authority, and degraded behavior. These roles stay collocated in
-one binary—they are not three parallel command trees or services.

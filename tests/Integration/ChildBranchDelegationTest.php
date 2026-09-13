@@ -7,18 +7,18 @@ require_once dirname(__DIR__) . '/Pest.php';
 use Cognesy\Agents\Capability\Cancellation\InMemoryCancellationSource;
 use Cognesy\Agents\Drivers\Testing\FakeAgentDriver;
 use Cognesy\Agents\Drivers\Testing\ScenarioStep;
+use Cognesy\Agents\Enums\ExecutionStatus;
 use Cognesy\Agents\Hook\Collections\HookTriggers;
 use Cognesy\Agents\Hook\Enums\HookTrigger;
 use Cognesy\Agents\Hook\Hooks\CallableHook;
 use Cognesy\Agents\Hook\HookStack;
-use Cognesy\Tell\Command\WorkspaceInspectionCommand;
+use Cognesy\Tell\Adapter\Console\Command\WorkspaceInspectionCommand;
 use Cognesy\Tell\Data\TellRequest;
-use Cognesy\Tell\Tell;
-use Cognesy\Tell\Workspace\Arena\FilesystemArena;
-use Cognesy\Tell\Workspace\Branch\Storage\BranchCurrentSelectionStore;
-use Cognesy\Tell\Workspace\Branch\Storage\BranchStore;
-use Cognesy\Tell\Workspace\Execution\TurnException;
-use Cognesy\Tell\Workspace\WorkspaceState;
+use Cognesy\Tell\Data\TellPublicationStatus;
+use Cognesy\Tell\Capability\Workspace\Filesystem\FilesystemArena;
+use Cognesy\Tell\Capability\Workspace\Filesystem\FilesystemBranchSelectionStore;
+use Cognesy\Tell\Core\Workspace\Branch\Storage\BranchStore;
+use Cognesy\Tell\Capability\Workspace\Filesystem\WorkspaceState;
 use Symfony\Component\Console\Tester\CommandTester;
 
 /** @param list<string> $arguments @return array{code: int, output: string, errors: string} */
@@ -56,16 +56,16 @@ it('publishes a fresh delegated child on an isolated Tell-owned branch with insp
     });
     $project = tellLastTemporaryRoot() . '/project';
     mkdir($project, 0755, true);
-    $workspace = $factory->workspace()->initialize($project)->workspace;
+    $workspace = tellTestWorkspaces()->initialize($project)->workspace;
 
-    $result = Tell::open($project, $factory)->run(TellRequest::prompt('Delegate this')->durable());
+    $result = tellTestOpen($project, $factory)->run(TellRequest::prompt('Delegate this')->durable());
     $arena = new FilesystemArena($workspace);
-    $branches = (new BranchStore($arena, new BranchCurrentSelectionStore($workspace)))->names();
+    $branches = (new BranchStore($arena, new FilesystemBranchSelectionStore($workspace)))->names();
     $child = $branches[0];
     $ref = $arena->readRef('branches/' . $child->toString());
     $provenance = $ref->provenance?->toArray();
 
-    $history = new CommandTester(new WorkspaceInspectionCommand('history', $factory));
+    $history = new CommandTester(new WorkspaceInspectionCommand('history', tellTestConversations($factory)));
     $history->execute(['--dir' => $project, '--branch' => $child->toString(), '--json' => true]);
     $payload = json_decode($history->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
     $branchProcess = tellChildProcess($project, ['branch', 'show', $child->toString(), '--dir', $project, '--json']);
@@ -116,14 +116,14 @@ it('forks a child from the parent head before the parent advances', function ():
     });
     $project = tellLastTemporaryRoot() . '/fork-project';
     mkdir($project, 0755, true);
-    $workspace = $factory->workspace()->initialize($project)->workspace;
-    $tell = Tell::open($project, $factory);
+    $workspace = tellTestWorkspaces()->initialize($project)->workspace;
+    $tell = tellTestOpen($project, $factory);
 
     $tell->run(TellRequest::prompt('Create context')->durable());
     $arena = new FilesystemArena($workspace);
     $before = $arena->readRef()->head;
     $result = $tell->run(TellRequest::prompt('Delegate with context')->durable());
-    $childRef = $arena->readRef('branches/' . (new BranchStore($arena, new BranchCurrentSelectionStore($workspace)))->names()[0]->toString());
+    $childRef = $arena->readRef('branches/' . (new BranchStore($arena, new FilesystemBranchSelectionStore($workspace)))->names()[0]->toString());
 
     expect($result->isCompleted())->toBeTrue()
         ->and($before)->not->toBeNull()
@@ -149,12 +149,12 @@ it('runs a child coding tool under the inherited Tell policy and persists its se
     $project = tellLastTemporaryRoot() . '/child-tool-project';
     mkdir($project, 0755, true);
     file_put_contents($project . '/evidence.txt', "bounded evidence\n");
-    $workspace = $factory->workspace()->initialize($project)->workspace;
+    $workspace = tellTestWorkspaces()->initialize($project)->workspace;
 
-    $result = Tell::open($project, $factory)->run(TellRequest::prompt('Delegate tool work')->durable());
+    $result = tellTestOpen($project, $factory)->run(TellRequest::prompt('Delegate tool work')->durable());
     $arena = new FilesystemArena($workspace);
-    $child = (new BranchStore($arena, new BranchCurrentSelectionStore($workspace)))->names()[0];
-    $transcript = new CommandTester(new WorkspaceInspectionCommand('transcript', $factory));
+    $child = (new BranchStore($arena, new FilesystemBranchSelectionStore($workspace)))->names()[0];
+    $transcript = new CommandTester(new WorkspaceInspectionCommand('transcript', tellTestConversations($factory)));
     $transcript->execute(['--dir' => $project, '--branch' => $child->toString(), '--full' => true, '--json' => true]);
     $payload = json_decode($transcript->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
     $toolRows = array_values(array_filter(
@@ -191,7 +191,7 @@ it('rejects a stale child-head publication without moving the parent ref', funct
             new CallableHook(static function ($context) use (&$workspace) {
                 assert($workspace instanceof WorkspaceState);
                 $arena = new FilesystemArena($workspace);
-                $child = (new BranchStore($arena, new BranchCurrentSelectionStore($workspace)))->names()[0];
+                $child = (new BranchStore($arena, new FilesystemBranchSelectionStore($workspace)))->names()[0];
                 $reference = $arena->readRef('branches/' . $child->toString());
                 $arena->compareAndSwapToEmpty('branches/' . $child->toString(), $reference->head);
 
@@ -203,18 +203,19 @@ it('rejects a stale child-head publication without moving the parent ref', funct
     });
     $project = tellLastTemporaryRoot() . '/stale-child-project';
     mkdir($project, 0755, true);
-    $workspace = $factory->workspace()->initialize($project)->workspace;
-    $tell = Tell::open($project, $factory);
+    $workspace = tellTestWorkspaces()->initialize($project)->workspace;
+    $tell = tellTestOpen($project, $factory);
 
     $tell->run(TellRequest::prompt('Create parent context')->durable());
     $arena = new FilesystemArena($workspace);
     $before = $arena->readRef()->head;
 
-    expect(fn () => $tell->run(TellRequest::prompt('Delegate with a stale child head')->durable()))
-        ->toThrow(TurnException::class);
+    $result = $tell->run(TellRequest::prompt('Delegate with a stale child head')->durable());
 
-    $child = (new BranchStore($arena, new BranchCurrentSelectionStore($workspace)))->names()[0];
-    expect($before)->not->toBeNull()
+    $child = (new BranchStore($arena, new FilesystemBranchSelectionStore($workspace)))->names()[0];
+    expect($result->status())->toBe(ExecutionStatus::Failed)
+        ->and($result->publication()->status)->toBe(TellPublicationStatus::NotAttempted)
+        ->and($before)->not->toBeNull()
         ->and($arena->readRef()->head?->toString())->toBe($before->toString())
         ->and($arena->readRef('branches/' . $child->toString())->head)->toBeNull();
 });
@@ -227,14 +228,16 @@ it('does not reserve a child ref for an invalid delegated definition', function 
     $factory = tellTestFactory(static fn ($loop) => $loop->withDriver($parent));
     $project = tellLastTemporaryRoot() . '/invalid-definition-project';
     mkdir($project, 0755, true);
-    $workspace = $factory->workspace()->initialize($project)->workspace;
+    $workspace = tellTestWorkspaces()->initialize($project)->workspace;
 
-    expect(fn () => Tell::open($project, $factory)->run(
+    $result = tellTestOpen($project, $factory)->run(
         TellRequest::prompt('Reject invalid child')->durable(),
-    ))->toThrow(TurnException::class);
+    );
     $arena = new FilesystemArena($workspace);
 
-    expect((new BranchStore($arena, new BranchCurrentSelectionStore($workspace)))->names())->toBe([])
+    expect($result->status())->toBe(ExecutionStatus::Failed)
+        ->and($result->publication()->status)->toBe(TellPublicationStatus::NotAttempted)
+        ->and((new BranchStore($arena, new FilesystemBranchSelectionStore($workspace)))->names())->toBe([])
         ->and($arena->readRef()->head)->toBeNull();
 });
 
@@ -250,15 +253,17 @@ it('leaves a failed child at its initial head without publishing parent or child
     });
     $project = tellLastTemporaryRoot() . '/failed-child-project';
     mkdir($project, 0755, true);
-    $workspace = $factory->workspace()->initialize($project)->workspace;
+    $workspace = tellTestWorkspaces()->initialize($project)->workspace;
 
-    expect(fn () => Tell::open($project, $factory)->run(
+    $result = tellTestOpen($project, $factory)->run(
         TellRequest::prompt('Delegate failing child')->durable(),
-    ))->toThrow(TurnException::class);
+    );
     $arena = new FilesystemArena($workspace);
-    $childRef = $arena->readRef('branches/' . (new BranchStore($arena, new BranchCurrentSelectionStore($workspace)))->names()[0]->toString());
+    $childRef = $arena->readRef('branches/' . (new BranchStore($arena, new FilesystemBranchSelectionStore($workspace)))->names()[0]->toString());
 
-    expect($childRef->head)->toBeNull()
+    expect($result->status())->toBe(ExecutionStatus::Failed)
+        ->and($result->publication()->status)->toBe(TellPublicationStatus::NotAttempted)
+        ->and($childRef->head)->toBeNull()
         ->and($arena->readRef()->head)->toBeNull();
 });
 
@@ -279,15 +284,17 @@ it('propagates cancellation into a child and leaves both refs unpublished', func
     });
     $project = tellLastTemporaryRoot() . '/cancelled-child-project';
     mkdir($project, 0755, true);
-    $workspace = $factory->workspace()->initialize($project)->workspace;
+    $workspace = tellTestWorkspaces()->initialize($project)->workspace;
 
-    expect(fn () => Tell::open($project, $factory, $cancellation)->run(
+    $result = tellTestOpen($project, $factory, $cancellation)->run(
         TellRequest::prompt('Delegate cancelled child')->durable(),
-    ))->toThrow(TurnException::class);
+    );
     $arena = new FilesystemArena($workspace);
-    $childRef = $arena->readRef('branches/' . (new BranchStore($arena, new BranchCurrentSelectionStore($workspace)))->names()[0]->toString());
+    $childRef = $arena->readRef('branches/' . (new BranchStore($arena, new FilesystemBranchSelectionStore($workspace)))->names()[0]->toString());
 
-    expect($childRef->head)->toBeNull()
+    expect($result->status())->toBe(ExecutionStatus::Stopped)
+        ->and($result->publication()->status)->toBe(TellPublicationStatus::NotAttempted)
+        ->and($childRef->head)->toBeNull()
         ->and($arena->readRef()->head)->toBeNull();
 });
 
@@ -305,15 +312,17 @@ it('rejects delegation from a child without reserving a grandchild branch', func
     });
     $project = tellLastTemporaryRoot() . '/depth-limited-child-project';
     mkdir($project, 0755, true);
-    $workspace = $factory->workspace()->initialize($project)->workspace;
+    $workspace = tellTestWorkspaces()->initialize($project)->workspace;
 
-    expect(fn () => Tell::open($project, $factory)->run(
+    $result = tellTestOpen($project, $factory)->run(
         TellRequest::prompt('Reject recursive delegation')->durable(),
-    ))->toThrow(TurnException::class);
+    );
     $arena = new FilesystemArena($workspace);
-    $childRef = $arena->readRef('branches/' . (new BranchStore($arena, new BranchCurrentSelectionStore($workspace)))->names()[0]->toString());
+    $childRef = $arena->readRef('branches/' . (new BranchStore($arena, new FilesystemBranchSelectionStore($workspace)))->names()[0]->toString());
 
-    expect((new BranchStore($arena, new BranchCurrentSelectionStore($workspace)))->names())->toHaveCount(1)
+    expect($result->status())->toBe(ExecutionStatus::Failed)
+        ->and($result->publication()->status)->toBe(TellPublicationStatus::NotAttempted)
+        ->and((new BranchStore($arena, new FilesystemBranchSelectionStore($workspace)))->names())->toHaveCount(1)
         ->and($childRef->head)->toBeNull()
         ->and($arena->readRef()->head)->toBeNull();
 });

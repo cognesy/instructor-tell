@@ -5,20 +5,20 @@ declare(strict_types=1);
 require_once dirname(__DIR__) . '/Pest.php';
 
 use Cognesy\Agents\Continuation\StopReason;
+use Cognesy\Agents\Enums\ExecutionStatus;
 use Cognesy\Agents\Data\AgentState;
 use Cognesy\Agents\Data\ToolExecution;
 use Cognesy\Agents\Drivers\Testing\FakeAgentDriver;
 use Cognesy\Agents\Hook\Data\HookContext;
 use Cognesy\Messages\ToolCall;
-use Cognesy\Tell\Command\ConfigCommand;
-use Cognesy\Tell\Configuration\TellExecutionPolicy;
+use Cognesy\Tell\Adapter\Console\Command\ConfigCommand;
+use Cognesy\Tell\Data\TellExecutionPolicy;
 use Cognesy\Tell\Data\TellRequest;
-use Cognesy\Tell\Runtime\CanReadTellClock;
-use Cognesy\Tell\Runtime\TellExecutionBudgetHook;
-use Cognesy\Tell\Tell;
-use Cognesy\Tell\Workspace\Arena\FilesystemArena;
-use Cognesy\Tell\Workspace\Branch\Storage\BranchConfigStore;
-use Cognesy\Tell\Workspace\Execution\TurnException;
+use Cognesy\Tell\Data\TellPublicationStatus;
+use Cognesy\Tell\Core\Contract\Execution\CanReadTellClock;
+use Cognesy\Tell\Core\Agent\TellExecutionBudgetHook;
+use Cognesy\Tell\Capability\Workspace\Filesystem\FilesystemArena;
+use Cognesy\Tell\Capability\Workspace\Filesystem\FilesystemBranchConfigurationStore;
 use Cognesy\Utils\Result\Result;
 use Symfony\Component\Console\Tester\CommandTester;
 
@@ -68,8 +68,8 @@ it('loads project and user policy defaults into effective branch configuration',
     $factory = tellTestFactory();
     $project = tellLastTemporaryRoot() . '/policy-defaults';
     mkdir($project, 0700, true);
-    $factory->workspace()->initialize($project);
-    $workspace = $factory->workspace()->discover($project) ?? throw new RuntimeException('workspace missing');
+    tellTestWorkspaces()->initialize($project);
+    $workspace = tellTestWorkspaces()->discover($project) ?? throw new RuntimeException('workspace missing');
     if (!is_dir($factory->paths()->configDirectory)) {
         mkdir($factory->paths()->configDirectory, 0700, true);
     }
@@ -84,9 +84,9 @@ it('loads project and user policy defaults into effective branch configuration',
         'schema' => 'tell.execution-defaults.v1',
         'values' => ['maxOutputChars' => 4_096],
     ], JSON_THROW_ON_ERROR));
-    (new BranchConfigStore($workspace))->set('main', 'maxToolCalls', 7, 0);
+    (new FilesystemBranchConfigurationStore($workspace))->set('main', 'maxToolCalls', 7, 0);
 
-    $tester = new CommandTester(new ConfigCommand($factory));
+    $tester = new CommandTester(new ConfigCommand(tellTestConversations($factory)));
     expect($tester->execute(['action' => 'effective', '--dir' => $project, '--json' => true]))->toBe(0);
     $payload = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
 
@@ -168,12 +168,15 @@ it('does not publish a durable turn when the total model-output budget is exceed
     ));
     $project = tellLastTemporaryRoot() . '/policy-workspace';
     mkdir($project, 0700, true);
-    $factory->workspace()->initialize($project);
+    tellTestWorkspaces()->initialize($project);
 
-    expect(fn () => Tell::open($project, $factory)->run(
+    $result = tellTestOpen($project, $factory)->run(
         TellRequest::prompt('Answer briefly')->durable()->maxOutputChars(8),
-    ))->toThrow(TurnException::class);
-    $workspace = $factory->workspace()->discover($project);
+    );
+    $workspace = tellTestWorkspaces()->discover($project);
 
-    expect((new FilesystemArena($workspace ?? throw new RuntimeException('workspace missing')))->readRef('main')->head)->toBeNull();
+    expect($result->status())->toBe(ExecutionStatus::Stopped)
+        ->and($result->termination()->stopSignal?->reason)->toBe(StopReason::OutputLimitReached)
+        ->and($result->publication()->status)->toBe(TellPublicationStatus::NotAttempted)
+        ->and((new FilesystemArena($workspace ?? throw new RuntimeException('workspace missing')))->readRef('main')->head)->toBeNull();
 });

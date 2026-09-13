@@ -8,12 +8,12 @@ use Cognesy\Agents\AgentLoop;
 use Cognesy\Agents\Drivers\Testing\FakeAgentDriver;
 use Cognesy\Agents\Drivers\Testing\ScenarioStep;
 use Cognesy\Agents\Session\Data\SessionId;
-use Cognesy\Tell\Command\SessionsCommand;
-use Cognesy\Tell\Console\TellCommand;
+use Cognesy\Tell\Adapter\Console\Command\SessionsCommand;
+use Cognesy\Tell\Adapter\Console\Symfony\TellCommand;
 use Cognesy\Tell\Tests\Support\RecordingDriver;
 use Cognesy\Tell\Tests\Support\RequestRecorder;
-use Cognesy\Tell\Workspace\Arena\FilesystemArena;
-use Cognesy\Tell\Workspace\Session\SessionRef;
+use Cognesy\Tell\Capability\Workspace\Filesystem\FilesystemArena;
+use Cognesy\Tell\Core\Workspace\Session\SessionRef;
 use HelgeSverre\Toon\Toon;
 use Symfony\Component\Console\Tester\CommandTester;
 
@@ -21,22 +21,16 @@ it('continues a named session with its prior messages in the next compiled reque
     $recorder = new RequestRecorder();
     $driver = new RecordingDriver($recorder);
     $factory = tellTestFactory(static fn ($loop) => $loop->withDriver($driver));
-    $command = new TellCommand($factory);
+    $command = tellTestCommand($factory);
     $project = tellLastTemporaryRoot() . '/named-session-project';
     mkdir($project, 0755, true);
-    $workspace = $factory->workspace()->initialize($project)->workspace;
+    $workspace = tellTestWorkspaces()->initialize($project)->workspace;
 
     (new CommandTester($command))->execute(['prompt' => 'first turn', '--session' => 's1', '--dir' => $project]);
     (new CommandTester($command))->execute(['prompt' => 'second turn', '--session' => 's1', '--dir' => $project]);
 
     $sessionRef = new SessionRef(SessionId::from('s1'));
-    $secondRequest = array_map(
-        static fn (array $message): array => [
-            'role' => $message['role'],
-            'content' => $message['content'],
-        ],
-        $recorder->requests[1],
-    );
+    $secondRequest = $recorder->textProjection(1);
     expect((new FilesystemArena($workspace))->readRef($sessionRef->refName())->head)->not->toBeNull()
         ->and($recorder->requests)->toHaveCount(2)
         ->and($secondRequest)->toContain(['role' => 'user', 'content' => 'first turn'])
@@ -46,7 +40,7 @@ it('continues a named session with its prior messages in the next compiled reque
 
 it('does not create session storage without the session option', function (): void {
     $factory = tellTestFactory(static fn ($loop) => $loop->withDriver(FakeAgentDriver::fromResponses('done')));
-    (new CommandTester(new TellCommand($factory)))->execute(['prompt' => 'stateless']);
+    (new CommandTester(tellTestCommand($factory)))->execute(['prompt' => 'stateless']);
 
     expect(is_dir($factory->paths()->sessions))->toBeFalse();
 });
@@ -56,17 +50,17 @@ it('bounds session detail until full content is requested', function (): void {
     $factory = tellTestFactory(static fn ($loop) => $loop->withDriver(FakeAgentDriver::fromResponses('done')));
     $project = tellLastTemporaryRoot() . '/long-session-project';
     mkdir($project, 0755, true);
-    $factory->workspace()->initialize($project);
-    (new CommandTester(new TellCommand($factory)))->execute([
+    tellTestWorkspaces()->initialize($project);
+    (new CommandTester(tellTestCommand($factory)))->execute([
         'prompt' => $prompt,
         '--session' => 'long-session',
         '--dir' => $project,
     ]);
 
-    $summary = new CommandTester(new SessionsCommand($factory));
+    $summary = new CommandTester(new SessionsCommand(tellTestConversations($factory)));
     $summary->execute(['action' => 'show', 'id' => 'long-session', '--dir' => $project]);
     $summaryPayload = Toon::decode($summary->getDisplay());
-    $full = new CommandTester(new SessionsCommand($factory));
+    $full = new CommandTester(new SessionsCommand(tellTestConversations($factory)));
     $full->execute(['action' => 'show', 'id' => 'long-session', '--full' => true, '--dir' => $project]);
     $fullPayload = Toon::decode($full->getDisplay());
 
@@ -79,7 +73,7 @@ it('bounds session detail until full content is requested', function (): void {
 
 it('returns stable success, failure, and stopped exit codes', function (FakeAgentDriver $driver, int $expected): void {
     $factory = tellTestFactory(static fn ($loop) => $loop->withDriver($driver));
-    $tester = new CommandTester(new TellCommand($factory));
+    $tester = new CommandTester(tellTestCommand($factory));
     $status = $tester->execute(['prompt' => 'status', '--max-steps' => '1']);
 
     expect($status)->toBe($expected);

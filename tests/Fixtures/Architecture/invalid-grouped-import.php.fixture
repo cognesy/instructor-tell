@@ -1,0 +1,19 @@
+<?php
+
+namespace Cognesy\Tell\Adapter\Console;
+
+use Cognesy\Tell\Core\{
+    Contract\Execution\CanObserveTellRun,
+    Workspace\Branch\BranchResolver,
+    Workspace\Branch\Storage\BranchStore,
+    Workspace\Compaction\CompactionRunner,
+    Workspace\Conversation\ConversationReader,
+};
+
+final class InvalidGroupedImport
+{
+    public function __construct(
+        public CanObserveTellRun $run,
+        public BranchResolver $branches,
+    ) {}
+}

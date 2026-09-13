@@ -1,0 +1,89 @@
+<?php
+
+declare(strict_types=1);
+
+namespace Cognesy\Tell\Adapter\Console\Command;
+
+use Cognesy\Tell\Adapter\Console\Render\FieldSelection;
+use Cognesy\Tell\Adapter\Console\Render\StructuredOutput;
+use Cognesy\Tell\Core\Contract\Agent\CanBuildTellAgent;
+use Override;
+use Symfony\Component\Console\Command\Command;
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Input\InputOption;
+use Symfony\Component\Console\Output\OutputInterface;
+
+final class AgentsCommand extends Command
+{
+    public function __construct(private readonly CanBuildTellAgent $agents) {
+        parent::__construct('agents');
+    }
+
+    #[Override]
+    protected function configure(): void {
+        $this->setDescription('List available agent definitions')
+            ->setHelp(<<<'HELP'
+List agent definitions discovered from package, user, and project locations.
+
+Examples:
+  tell agents
+  tell agents --fields=name,description
+  tell agents --json
+HELP)
+            ->addOption('dir', 'C', InputOption::VALUE_REQUIRED, 'Project directory', '')
+            ->addOption('fields', null, InputOption::VALUE_REQUIRED, 'Comma-separated fields: name,label,description', '')
+            ->addOption('json', null, InputOption::VALUE_NONE, 'Emit JSON');
+    }
+
+    #[Override]
+    protected function execute(InputInterface $input, OutputInterface $output): int {
+        $directory = (string) $input->getOption('dir');
+        $cwd = getcwd();
+        $project = match (true) {
+            $directory !== '' => $directory,
+            is_string($cwd) => $cwd,
+            default => '.',
+        };
+        $registry = $this->agents->definitions($project);
+        $definitions = [];
+        foreach ($registry->all() as $definition) {
+            $definitions[] = [
+                'name' => $definition->name,
+                'label' => $definition->label(),
+                'description' => $definition->description,
+            ];
+        }
+        usort(
+            $definitions,
+            static fn (array $left, array $right): int => $left['name'] <=> $right['name'],
+        );
+        $errors = $registry->errors();
+        ksort($errors);
+        $fields = FieldSelection::from(
+            (string) $input->getOption('fields'),
+            ['name', 'label', 'description'],
+            ['name', 'label', 'description'],
+        );
+        $errorRows = [];
+        foreach ($errors as $path => $error) {
+            $errorRows[] = ['path' => $path, 'error' => $error];
+        }
+        $payload = [
+            'count' => count($definitions),
+            'agents' => $fields->project($definitions),
+            'errorCount' => count($errorRows),
+            'errors' => $errorRows,
+            'help' => [
+                'Run `tell describe --agent <name>` for runtime details.',
+                'Run `tell "<prompt>" --agent <name>` to use an agent.',
+            ],
+        ];
+        if ($definitions === []) {
+            $payload['message'] = 'No agent definitions found in package, user, or project locations.';
+        }
+        (new StructuredOutput($output))->write($payload, json: (bool) $input->getOption('json'));
+
+        return Command::SUCCESS;
+    }
+
+}

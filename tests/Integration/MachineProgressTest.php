@@ -7,7 +7,7 @@ require_once dirname(__DIR__) . '/Pest.php';
 use Cognesy\Agents\AgentLoop;
 use Cognesy\Agents\Drivers\Testing\FakeAgentDriver;
 use Cognesy\Agents\Drivers\Testing\ScenarioStep;
-use Cognesy\Tell\Console\TellCommand;
+use Cognesy\Tell\Adapter\Console\Symfony\TellCommand;
 use Symfony\Component\Console\Tester\CommandTester;
 
 function tellProgressProject(): string {
@@ -18,7 +18,7 @@ function tellProgressProject(): string {
 }
 
 function tellProgressTester(ScenarioStep ...$steps): CommandTester {
-    return new CommandTester(new TellCommand(tellTestFactory(
+    return new CommandTester(tellTestCommand(tellTestFactory(
         static fn (AgentLoop $loop): AgentLoop => $loop->withDriver(FakeAgentDriver::fromSteps(...$steps)),
     )));
 }
@@ -42,12 +42,12 @@ it('reports the parameters a tool was called with and the result it returned', f
         ->and($progress)->toContain('[tool.start] name=shell step=1 args={"command":"echo traced","description":"prove it runs"}')
         ->and($progress)->toContain('[tool.complete] name=shell status=ok')
         ->and($progress)->toContain('"text":"traced\n"')
-        ->and($progress)->toContain('[execution.complete] status=completed');
+        ->and($progress)->toContain('[execution.settled] status=completed');
 });
 
 it('calls a tool failed when the tool returned its own failure envelope', function (): void {
     $tester = tellProgressTester(
-        ScenarioStep::toolCall('read', ['path' => 'missing.txt']),
+        ScenarioStep::toolCall('read_file', ['path' => 'missing.txt']),
         ScenarioStep::final('could not read'),
     );
 
@@ -56,13 +56,13 @@ it('calls a tool failed when the tool returned its own failure envelope', functi
         ['capture_stderr_separately' => true],
     ))->toBe(0);
 
-    expect($tester->getErrorOutput())->toContain('[tool.complete] name=read status=failed')
+    expect($tester->getErrorOutput())->toContain('[tool.complete] name=read_file status=failed')
         ->and($tester->getErrorOutput())->toContain('"code":"operation_failed"');
 });
 
 it('keeps an oversized payload parsable by emitting an excerpt and its real size', function (): void {
     $tester = tellProgressTester(
-        ScenarioStep::toolCall('write', ['path' => 'big.txt', 'content' => str_repeat("a long line of content\n", 60)]),
+        ScenarioStep::toolCall('write_file', ['path' => 'big.txt', 'content' => str_repeat("a long line of content\n", 60)]),
         ScenarioStep::final('written'),
     );
 
@@ -73,7 +73,7 @@ it('keeps an oversized payload parsable by emitting an excerpt and its real size
 
     $line = array_values(array_filter(
         explode("\n", $tester->getErrorOutput()),
-        static fn (string $candidate): bool => str_starts_with($candidate, '[tool.start] name=write'),
+        static fn (string $candidate): bool => str_starts_with($candidate, '[tool.start] name=write_file'),
     ))[0] ?? '';
 
     expect($line)->toMatch('/ argsBytes=\d{4,}$/');
@@ -85,7 +85,7 @@ it('keeps an oversized payload parsable by emitting an excerpt and its real size
 
 it('leaves the bare heartbeat alone when no progress channel was asked for', function (): void {
     $tester = tellProgressTester(
-        ScenarioStep::toolCall('read', ['path' => 'notes.txt']),
+        ScenarioStep::toolCall('read_file', ['path' => 'notes.txt']),
         ScenarioStep::final('done'),
     );
     $project = tellProgressProject();

@@ -7,23 +7,22 @@ require_once dirname(__DIR__) . '/Pest.php';
 use Cognesy\Agents\AgentLoop;
 use Cognesy\Agents\Session\Data\SessionId;
 use Cognesy\Agents\Template\Factory\DefinitionStateFactory;
-use Cognesy\Tell\Command\ContextCommand;
-use Cognesy\Tell\Console\TellApplication;
-use Cognesy\Tell\Console\TellOptions;
-use Cognesy\Tell\Runtime\TellAgentFactory;
-use Cognesy\Tell\Workspace\Arena\FilesystemArena;
-use Cognesy\Tell\Workspace\Arena\ObjectHash;
-use Cognesy\Tell\Workspace\Arena\Record\ConversationRoot;
-use Cognesy\Tell\Workspace\Arena\Record\Lineage;
-use Cognesy\Tell\Workspace\Arena\Record\Message as RecordMessage;
-use Cognesy\Tell\Workspace\Arena\Record\Role;
-use Cognesy\Tell\Workspace\Arena\Record\TextPart;
-use Cognesy\Tell\Workspace\Arena\Record\ToolCall;
-use Cognesy\Tell\Workspace\Arena\Record\ToolResult;
-use Cognesy\Tell\Workspace\Arena\Record\Turn;
-use Cognesy\Tell\Workspace\Conversation\ConversationReader;
-use Cognesy\Tell\Workspace\Session\SessionRef;
-use Cognesy\Tell\Workspace\WorkspaceState;
+use Cognesy\Tell\Adapter\Console\Command\ContextCommand;
+use Cognesy\Tell\Adapter\Console\Symfony\TellOptions;
+use Cognesy\Tell\Core\Agent\TellAgentFactory;
+use Cognesy\Tell\Capability\Workspace\Filesystem\FilesystemArena;
+use Cognesy\Tell\Core\Workspace\Arena\ObjectHash;
+use Cognesy\Tell\Core\Workspace\Arena\Record\ConversationRoot;
+use Cognesy\Tell\Core\Workspace\Arena\Record\Lineage;
+use Cognesy\Tell\Core\Workspace\Arena\Record\Message as RecordMessage;
+use Cognesy\Tell\Core\Workspace\Arena\Record\Role;
+use Cognesy\Tell\Core\Workspace\Arena\Record\TextPart;
+use Cognesy\Tell\Core\Workspace\Arena\Record\ToolCall;
+use Cognesy\Tell\Core\Workspace\Arena\Record\ToolResult;
+use Cognesy\Tell\Core\Workspace\Arena\Record\Turn;
+use Cognesy\Tell\Core\Workspace\Conversation\ConversationReader;
+use Cognesy\Tell\Core\Workspace\Session\SessionRef;
+use Cognesy\Tell\Capability\Workspace\Filesystem\WorkspaceState;
 use Symfony\Component\Console\Output\BufferedOutput;
 use Symfony\Component\Console\Tester\CommandTester;
 
@@ -35,7 +34,7 @@ it('inspects an empty workspace context without loop construction or persistence
     $workspace = tellContextWorkspace($factory, $project);
     $arenaBefore = tellContextSnapshot($workspace->paths->arena);
     $homeBefore = tellContextSnapshot($factory->paths()->home);
-    $application = new TellApplication($factory);
+    $application = tellTestApplication($factory);
     $application->setAutoExit(false);
     $output = new BufferedOutput();
 
@@ -50,8 +49,8 @@ it('inspects an empty workspace context without loop construction or persistence
         ->and($payload['compiled']['messageCount'])->toBe(0)
         ->and($payload['compiled']['toolCallCount'])->toBe(0)
         ->and($payload['compiled']['toolResultCount'])->toBe(0)
-        ->and($payload['tokens']['modelCapacity']['value'])->toBeNull()
-        ->and($payload['tokens']['modelCapacity']['status'])->toBe('unknown')
+        ->and($payload['tokens']['modelCapacity']['value'])->toBe(400_000)
+        ->and($payload['tokens']['modelCapacity']['status'])->toBe('exact')
         ->and($payload['tokens']['context']['status'])->toBe('estimated')
         ->and($payload['tokens']['context']['estimator'])->toMatchArray([
             'identity' => 'gpt3-bpe',
@@ -69,11 +68,13 @@ it('reports the compiled AgentState, tool-heavy context, configured thresholds, 
     [, $discarded, $head] = tellContextSeedToolHistory($arena);
     $before = tellContextSnapshot($workspace->paths->arena);
     $homeBefore = tellContextSnapshot($factory->paths()->home);
-    $tester = new CommandTester(new ContextCommand($factory));
+    $tester = new CommandTester(new ContextCommand(tellTestConversations($factory)));
 
     expect($tester->execute(['--dir' => $project, '--json' => true]))->toBe(0);
     $payload = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
-    $definition = $factory->definition(new TellOptions(prompt: 'Inspect Tell context.', directory: $project));
+    $definition = $factory->definition(
+        (new TellOptions(prompt: 'Inspect Tell context.', directory: $project))->request(),
+    );
     $state = (new DefinitionStateFactory())
         ->instantiateAgentState($definition)
         ->withMessages((new ConversationReader($arena))->read()->history()->messages);
@@ -90,10 +91,10 @@ it('reports the compiled AgentState, tool-heavy context, configured thresholds, 
         ])
         ->and($payload['tokens']['context']['value'])->toBe(123)
         ->and($payload['tokens']['context']['status'])->toBe('estimated')
-        ->and($payload['tokens']['configuredLimit']['status'])->toBe('exact')
-        ->and($payload['tokens']['remainingConfiguredLimit']['status'])->toBe('estimated')
+        ->and($payload['tokens']['modelCapacity']['status'])->toBe('exact')
+        ->and($payload['tokens']['remainingModelCapacity']['status'])->toBe('estimated')
         ->and($payload['warningThresholds']['warning']['tokens'])->toBe(
-            (int) floor($payload['tokens']['configuredLimit']['value'] * 0.80),
+            (int) floor($payload['tokens']['modelCapacity']['value'] * 0.80),
         )
         ->and($payload['configuration'])->toMatchArray([
             'connection' => 'openai',
@@ -118,7 +119,7 @@ it('inspects a named canonical session without exposing its hashed session ref',
     ));
     $arena->compareAndSwap($sessionRef->refName(), null, $root);
     $before = tellContextSnapshot($workspace->paths->arena);
-    $tester = new CommandTester(new ContextCommand($factory));
+    $tester = new CommandTester(new ContextCommand(tellTestConversations($factory)));
 
     expect($tester->execute(['--dir' => $project, '--session' => 'review-1', '--json' => true]))->toBe(0);
     $display = $tester->getDisplay();
@@ -136,21 +137,19 @@ it('keeps unknown configured capacity explicit and fails corrupt contexts withou
     $workspace = tellContextWorkspace($factory, $project);
     $arena = new FilesystemArena($workspace);
     [$root] = tellContextSeedToolHistory($arena);
-    $command = new ContextCommand($factory);
+    $command = new ContextCommand(tellTestConversations($factory));
     $unknown = new CommandTester($command);
 
     expect($unknown->execute([
         '--dir' => $project,
-        '--dsn' => 'driver=openai,model=unknown,contextLength=0',
+        '--dsn' => 'driver=openai,model=unknown',
         '--json' => true,
     ]))->toBe(0);
     $unknownPayload = json_decode($unknown->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
     expect($unknownPayload['tokens']['modelCapacity']['value'])->toBeNull()
         ->and($unknownPayload['tokens']['modelCapacity']['status'])->toBe('unknown')
-        ->and($unknownPayload['tokens']['configuredLimit']['value'])->toBeNull()
-        ->and($unknownPayload['tokens']['configuredLimit']['status'])->toBe('unknown')
-        ->and($unknownPayload['tokens']['remainingConfiguredLimit']['value'])->toBeNull()
-        ->and($unknownPayload['tokens']['remainingConfiguredLimit']['status'])->toBe('unknown');
+        ->and($unknownPayload['tokens']['remainingModelCapacity']['value'])->toBeNull()
+        ->and($unknownPayload['tokens']['remainingModelCapacity']['status'])->toBe('unknown');
 
     file_put_contents($arena->objectPath($root), '{"kind":"conversation"}');
     $before = tellContextSnapshot($workspace->paths->arena);
@@ -165,13 +164,13 @@ it('keeps unknown configured capacity explicit and fails corrupt contexts withou
 function tellContextProject(TellAgentFactory $factory): string {
     $project = tellLastTemporaryRoot() . '/context-workspace';
     mkdir($project, 0700, true);
-    $factory->workspace()->initialize($project);
+    tellTestWorkspaces()->initialize($project);
 
     return $project;
 }
 
 function tellContextWorkspace(TellAgentFactory $factory, string $project): WorkspaceState {
-    $workspace = $factory->workspace()->discover($project);
+    $workspace = tellTestWorkspaces()->discover($project);
     if ($workspace === null) {
         throw new RuntimeException('Expected initialized Tell workspace to be discoverable.');
     }

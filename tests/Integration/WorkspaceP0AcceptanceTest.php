@@ -5,13 +5,13 @@ declare(strict_types=1);
 require_once dirname(__DIR__) . '/Pest.php';
 
 use Cognesy\Agents\AgentLoop;
-use Cognesy\Tell\Configuration\TellPaths;
-use Cognesy\Tell\Console\TellApplication;
-use Cognesy\Tell\Runtime\TellAgentFactory;
+use Cognesy\Tell\Core\Paths\TellPaths;
+use Cognesy\Tell\Adapter\Console\Symfony\TellConsoleApplication;
+use Cognesy\Tell\Core\Agent\TellAgentFactory;
 use Cognesy\Tell\Tests\Support\RecordingDriver;
 use Cognesy\Tell\Tests\Support\RequestRecorder;
-use Cognesy\Tell\Workspace\Arena\FilesystemArena;
-use Cognesy\Tell\Workspace\WorkspaceState;
+use Cognesy\Tell\Capability\Workspace\Filesystem\FilesystemArena;
+use Cognesy\Tell\Capability\Workspace\Filesystem\WorkspaceState;
 use Symfony\Component\Console\Output\BufferedOutput;
 
 it('keeps the complete P0 workspace lifecycle durable across fresh Tell applications', function (): void {
@@ -39,7 +39,8 @@ it('keeps the complete P0 workspace lifecycle durable across fresh Tell applicat
     ]);
     expect($status)->toBe(0)
         ->and($firstTurn['answer'])->toBe('verified semantic response')
-        ->and($firstTurn['execution'])->toBe(['mode' => 'durable', 'durable' => true]);
+        ->and($firstTurn['execution']['mode'])->toBe('durable')
+        ->and($firstTurn['publication']['status'])->toBe('published');
 
     [$status, $history] = tellP0Run(tellP0Application($factory->paths(), $recorder), [
         'history',
@@ -78,7 +79,8 @@ it('keeps the complete P0 workspace lifecycle durable across fresh Tell applicat
         '--output=json',
     ]);
     expect($status)->toBe(0)
-        ->and($transient['execution'])->toBe(['mode' => 'transient', 'durable' => false])
+        ->and($transient['execution']['mode'])->toBe('transient')
+        ->and($transient['publication']['status'])->toBe('not_applicable')
         ->and(tellP0Snapshot($workspace->paths->arena))->toBe($arenaBeforeTransient)
         ->and(tellP0Snapshot($factory->paths()->sessions))->toBe($sessionsBeforeTransient);
 
@@ -101,7 +103,7 @@ it('keeps the complete P0 workspace lifecycle durable across fresh Tell applicat
         $project,
         '--output=json',
     ])[0])->toBe(0);
-    $compactedContinuation = tellP0Messages($recorder->requests[array_key_last($recorder->requests)]);
+    $compactedContinuation = $recorder->textProjection(array_key_last($recorder->requests));
     expect($compactedContinuation)
         ->toContain(['role' => 'assistant', 'content' => 'verified semantic response'])
         ->toContain(['role' => 'user', 'content' => 'continue after compaction']);
@@ -131,7 +133,7 @@ it('keeps the complete P0 workspace lifecycle durable across fresh Tell applicat
         '--output=json',
     ])[0])->toBe(0);
 
-    $restartedContinuation = tellP0Messages($recorder->requests[array_key_last($recorder->requests)]);
+    $restartedContinuation = $recorder->textProjection(array_key_last($recorder->requests));
     expect($restartedContinuation)
         ->toContain(['role' => 'user', 'content' => 'restart after clear'])
         ->toContain(['role' => 'assistant', 'content' => 'verified semantic response'])
@@ -139,13 +141,15 @@ it('keeps the complete P0 workspace lifecycle durable across fresh Tell applicat
         ->not->toContain(['role' => 'user', 'content' => 'record the release decision']);
 });
 
-function tellP0Application(TellPaths $paths, RequestRecorder $recorder): TellApplication {
-    $application = new TellApplication(new TellAgentFactory(
+function tellP0Application(TellPaths $paths, RequestRecorder $recorder): TellConsoleApplication {
+    $factory = tellAgentFactoryForPaths(
         $paths,
+        dirname($paths->home),
         static fn (AgentLoop $loop): AgentLoop => $loop->withDriver(
             new RecordingDriver($recorder, 'verified semantic response'),
         ),
-    ));
+    );
+    $application = tellTestApplication($factory);
     $application->setAutoExit(false);
 
     return $application;
@@ -155,7 +159,7 @@ function tellP0Application(TellPaths $paths, RequestRecorder $recorder): TellApp
  * @param  list<string>  $arguments
  * @return array{0: int, 1: array<string, mixed>}
  */
-function tellP0Run(TellApplication $application, array $arguments): array {
+function tellP0Run(TellConsoleApplication $application, array $arguments): array {
     $output = new BufferedOutput();
     $status = $application->runArgv(['tell', ...$arguments], $output);
     $payload = json_decode($output->fetch(), true, flags: JSON_THROW_ON_ERROR);
@@ -167,7 +171,7 @@ function tellP0Run(TellApplication $application, array $arguments): array {
 }
 
 function tellP0Workspace(TellAgentFactory $factory, string $project): WorkspaceState {
-    $workspace = $factory->workspace()->discover($project);
+    $workspace = tellTestWorkspaces()->discover($project);
     if ($workspace === null) {
         throw new RuntimeException('Expected the P0 acceptance workspace.');
     }
@@ -198,15 +202,4 @@ function tellP0Snapshot(string $directory): array {
     ksort($files);
 
     return $files;
-}
-
-/** @return list<array{role: string, content: string}> */
-function tellP0Messages(array $request): array {
-    return array_map(
-        static fn (array $message): array => [
-            'role' => $message['role'],
-            'content' => $message['content'],
-        ],
-        $request,
-    );
 }

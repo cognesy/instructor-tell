@@ -20,18 +20,18 @@ use Cognesy\Messages\Message;
 use Cognesy\Messages\Messages;
 use Cognesy\Polyglot\Inference\Data\InferenceResponse;
 use Cognesy\Polyglot\Inference\Data\InferenceUsage;
-use Cognesy\Tell\Console\TellCommand;
-use Cognesy\Tell\Runtime\TellAgentFactory;
+use Cognesy\Tell\Adapter\Console\Symfony\TellCommand;
+use Cognesy\Tell\Core\Agent\TellAgentFactory;
 use Cognesy\Tell\Tests\Support\RecordingDriver;
 use Cognesy\Tell\Tests\Support\RequestRecorder;
-use Cognesy\Tell\Workspace\Arena\FilesystemArena;
-use Cognesy\Tell\Workspace\Arena\HistoryCompiler;
-use Cognesy\Tell\Workspace\Arena\Record\Lineage;
-use Cognesy\Tell\Workspace\Arena\Record\Message as RecordMessage;
-use Cognesy\Tell\Workspace\Arena\Record\Role;
-use Cognesy\Tell\Workspace\Arena\Record\TextPart;
-use Cognesy\Tell\Workspace\Arena\Record\Turn;
-use Cognesy\Tell\Workspace\WorkspaceState;
+use Cognesy\Tell\Capability\Workspace\Filesystem\FilesystemArena;
+use Cognesy\Tell\Core\Workspace\Arena\HistoryCompiler;
+use Cognesy\Tell\Core\Workspace\Arena\Record\Lineage;
+use Cognesy\Tell\Core\Workspace\Arena\Record\Message as RecordMessage;
+use Cognesy\Tell\Core\Workspace\Arena\Record\Role;
+use Cognesy\Tell\Core\Workspace\Arena\Record\TextPart;
+use Cognesy\Tell\Core\Workspace\Arena\Record\Turn;
+use Cognesy\Tell\Capability\Workspace\Filesystem\WorkspaceState;
 use HelgeSverre\Toon\Toon;
 use Symfony\Component\Console\Tester\CommandTester;
 
@@ -41,24 +41,17 @@ it('continues a canonical workspace transcript with a fresh Tell process', funct
     $firstFactory = tellTestFactory(static fn (AgentLoop $loop): AgentLoop => $loop->withDriver($firstDriver));
     $project = tellWorkspaceProject($firstFactory);
 
-    $first = new CommandTester(new TellCommand($firstFactory));
+    $first = new CommandTester(tellTestCommand($firstFactory));
     expect($first->execute(['prompt' => 'first turn', '--dir' => $project]))->toBe(0);
 
     $secondDriver = new RecordingDriver($recorder, 'second answer');
-    $freshFactory = new TellAgentFactory(
-        $firstFactory->paths(),
+    $freshFactory = $firstFactory->withLoopDecorator(
         static fn (AgentLoop $loop): AgentLoop => $loop->withDriver($secondDriver),
     );
-    $second = new CommandTester(new TellCommand($freshFactory));
+    $second = new CommandTester(tellTestCommand($freshFactory));
     expect($second->execute(['prompt' => 'second turn', '--dir' => $project]))->toBe(0);
 
-    $secondRequest = array_map(
-        static fn (array $message): array => [
-            'role' => $message['role'],
-            'content' => $message['content'],
-        ],
-        $recorder->requests[1],
-    );
+    $secondRequest = $recorder->textProjection(1);
     $workspace = tellWorkspace($freshFactory, $project);
     $store = new FilesystemArena($workspace);
     $head = $store->readRef()->head;
@@ -83,7 +76,7 @@ it('continues a canonical workspace transcript with a fresh Tell process', funct
 it('compiles the same canonical head independently of provider selection', function (): void {
     $factory = tellTestFactory(static fn (AgentLoop $loop): AgentLoop => $loop->withDriver(FakeAgentDriver::fromResponses('durable answer')));
     $project = tellWorkspaceProject($factory);
-    (new CommandTester(new TellCommand($factory)))->execute(['prompt' => 'durable prompt', '--dir' => $project]);
+    (new CommandTester(tellTestCommand($factory)))->execute(['prompt' => 'durable prompt', '--dir' => $project]);
 
     $store = new FilesystemArena(tellWorkspace($factory, $project));
     $head = $store->readRef()->head;
@@ -107,23 +100,18 @@ it('writes only semantic canonical data and excludes provider observations', fun
             return $state->withCurrentStep(new AgentStep(
                 inputMessages: $state->messages(),
                 outputMessages: Messages::fromString('semantic answer', 'assistant'),
-                inferenceResponse: new InferenceResponse(
-                    content: 'semantic answer',
-                    reasoningContent: 'provider reasoning must remain outside arena',
-                    usage: new InferenceUsage(41, 17),
-                    responseData: HttpResponse::sync(
+                inferenceResponse: new InferenceResponse(message: \Cognesy\Messages\Message::asAssistant('semantic answer')->withReasoningContent('provider reasoning must remain outside arena'), usage: new InferenceUsage(41, 17), responseData: HttpResponse::sync(
                         200,
                         ['authorization' => 'Bearer provider-wire-secret'],
                         'provider-wire-payload',
-                    ),
-                ),
+                    )),
             ));
         }
     };
     $factory = tellTestFactory(static fn (AgentLoop $loop): AgentLoop => $loop->withDriver($driver));
     $project = tellWorkspaceProject($factory);
 
-    expect((new CommandTester(new TellCommand($factory)))->execute(['prompt' => 'persist only semantics', '--dir' => $project]))->toBe(0);
+    expect((new CommandTester(tellTestCommand($factory)))->execute(['prompt' => 'persist only semantics', '--dir' => $project]))->toBe(0);
 
     $arena = implode('', tellWorkspaceArenaSnapshot(tellWorkspace($factory, $project)));
     expect($arena)->toContain('persist only semantics')
@@ -136,12 +124,12 @@ it('writes only semantic canonical data and excludes provider observations', fun
         ->not->toContain('"responseData"');
 });
 
-it('leaves an empty workspace arena unchanged when inference cannot publish', function (CanUseTools $driver, string $expectedError): void {
+it('leaves an empty workspace arena unchanged when inference cannot publish', function (CanUseTools $driver, ?string $terminal, ?string $expectedError, ?string $expectedCode): void {
     $factory = tellTestFactory(static fn (AgentLoop $loop): AgentLoop => $loop->withDriver($driver));
     $project = tellWorkspaceProject($factory);
     $workspace = tellWorkspace($factory, $project);
     $before = tellWorkspaceArenaSnapshot($workspace);
-    $tester = new CommandTester(new TellCommand($factory));
+    $tester = new CommandTester(tellTestCommand($factory));
 
     $status = $tester->execute([
         'prompt' => 'must not publish',
@@ -151,14 +139,34 @@ it('leaves an empty workspace arena unchanged when inference cannot publish', fu
     $payload = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
 
     expect($status)->toBe(1)
-        ->and($payload)->toHaveKey('error')
-        ->and($payload['error'])->toContain($expectedError)
         ->and(tellWorkspaceArenaSnapshot($workspace))->toBe($before)
         ->and((new FilesystemArena($workspace))->readRef()->head)->toBeNull();
+    if ($terminal !== null) {
+        expect($payload['execution']['status'])->toBe($terminal)
+            ->and($payload['publication']['status'])->toBe('not_attempted')
+            ->and($payload)->not->toHaveKey('error');
+
+        return;
+    }
+    expect($payload)->toHaveKey('error');
+    $error = $payload['error'];
+    $message = match (true) {
+        is_array($error) => $error['message'] ?? '',
+        is_string($error) => $error,
+        default => '',
+    };
+    expect($message)->toContain($expectedError);
+    if (is_array($error)) {
+        expect($error['code'] ?? null)->toBe($expectedCode)
+            ->and($error['executionId'] ?? null)->toBeString()
+            ->and($error['trace']['executionId'] ?? null)->toBe($error['executionId'] ?? null);
+    }
 })->with([
     'driver failure' => [
         new FakeAgentDriver([ScenarioStep::error('failed')]),
-        'was not completed; arena head was left unchanged',
+        'failed',
+        null,
+        null,
     ],
     'cancellation' => [
         new class implements CanUseTools {
@@ -166,11 +174,15 @@ it('leaves an empty workspace arena unchanged when inference cannot publish', fu
                 throw new AgentStopException(StopSignal::userRequested('cancelled'));
             }
         },
-        'was not completed; arena head was left unchanged',
+        'stopped',
+        null,
+        null,
     ],
     'missing final response' => [
         new FakeAgentDriver([ScenarioStep::tool('')]),
-        'has no final response; arena head was left unchanged',
+        null,
+        'Tell execution completed without a final response.',
+        'turn_invariant_violation',
     ],
     'unsupported canonical message' => [
         new class implements CanUseTools {
@@ -184,18 +196,20 @@ it('leaves an empty workspace arena unchanged when inference cannot publish', fu
                         ),
                         'assistant',
                     )),
-                    inferenceResponse: new InferenceResponse(content: 'partly semantic'),
+                    inferenceResponse: new InferenceResponse(message: \Cognesy\Messages\Message::asAssistant('partly semantic')),
                 ));
             }
         },
+        null,
         'Collection contains composite messages and cannot be converted to string.',
+        'turn_record_invalid',
     ],
 ]);
 
 it('keeps the competing canonical head when a compare-and-swap race loses', function (): void {
     $factory = tellTestFactory(static fn (AgentLoop $loop): AgentLoop => $loop->withDriver(FakeAgentDriver::fromResponses('first answer')));
     $project = tellWorkspaceProject($factory);
-    expect((new CommandTester(new TellCommand($factory)))->execute(['prompt' => 'first turn', '--dir' => $project]))->toBe(0);
+    expect((new CommandTester(tellTestCommand($factory)))->execute(['prompt' => 'first turn', '--dir' => $project]))->toBe(0);
 
     $workspace = tellWorkspace($factory, $project);
     $store = new FilesystemArena($workspace);
@@ -216,8 +230,7 @@ it('keeps the competing canonical head when a compare-and-swap race loses', func
         ],
     ));
 
-    $racingFactory = new TellAgentFactory(
-        $factory->paths(),
+    $racingFactory = $factory->withLoopDecorator(
         static function (AgentLoop $loop) use ($store, $previousHead, $winningHead): AgentLoop {
             return $loop
                 ->withDriver(FakeAgentDriver::fromResponses('lost update'))
@@ -226,7 +239,7 @@ it('keeps the competing canonical head when a compare-and-swap race loses', func
                 });
         },
     );
-    $tester = new CommandTester(new TellCommand($racingFactory));
+    $tester = new CommandTester(tellTestCommand($racingFactory));
     $status = $tester->execute([
         'prompt' => 'concurrent turn',
         '--dir' => $project,
@@ -235,14 +248,17 @@ it('keeps the competing canonical head when a compare-and-swap race loses', func
     $payload = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
 
     expect($status)->toBe(1)
-        ->and($payload['error'])->toContain("Tell ref 'main' changed before it could be published.")
+        ->and($payload['error']['code'])->toBe('turn_publication_conflict')
+        ->and($payload['error']['message'])->toContain('Tell workspace changed before the turn could be published; arena head was left unchanged.')
+        ->and($payload['error']['publication'])->toBe('failed')
+        ->and($payload['error']['trace']['status'])->toBe('written')
         ->and($store->readRef()->head?->equals($winningHead))->toBeTrue();
 });
 
 it('keeps successful workspace output contracts intact', function (string $mode): void {
     $factory = tellTestFactory(static fn (AgentLoop $loop): AgentLoop => $loop->withDriver(FakeAgentDriver::fromResponses('workspace answer')));
     $project = tellWorkspaceProject($factory);
-    $tester = new CommandTester(new TellCommand($factory));
+    $tester = new CommandTester(tellTestCommand($factory));
     $status = $tester->execute(
         ['prompt' => 'render workspace answer', '--dir' => $project, '--output' => $mode],
         ['capture_stderr_separately' => true],
@@ -257,8 +273,8 @@ it('keeps successful workspace output contracts intact', function (string $mode)
                 static fn (string $line): array => json_decode($line, true, flags: JSON_THROW_ON_ERROR),
                 $lines,
             ),
-            static fn (array $event): bool => $event['schema'] === 'tell.event.v1'
-                && $event['kind'] === 'execution.completed'
+            static fn (array $event): bool => $event['schema'] === 'tell.event.v2'
+                && $event['kind'] === 'execution.settled'
                 && $event['terminal'] === 'completed',
         ))->not->toBeEmpty(),
         'text' => expect(trim($tester->getDisplay()))->toBe('workspace answer')
@@ -270,13 +286,13 @@ it('keeps successful workspace output contracts intact', function (string $mode)
 function tellWorkspaceProject(TellAgentFactory $factory): string {
     $project = tellLastTemporaryRoot() . '/workspace';
     mkdir($project, 0700, true);
-    $factory->workspace()->initialize($project);
+    tellTestWorkspaces()->initialize($project);
 
     return $project;
 }
 
 function tellWorkspace(TellAgentFactory $factory, string $project): WorkspaceState {
-    $workspace = $factory->workspace()->discover($project);
+    $workspace = tellTestWorkspaces()->discover($project);
     if ($workspace === null) {
         throw new RuntimeException('Expected initialized Tell workspace to be discoverable.');
     }

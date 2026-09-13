@@ -3,12 +3,9 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PACKAGE_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-AGENTS_DIR="$(cd "$PACKAGE_DIR/../agents" && pwd)"
-CONFIG_DIR="$(cd "$PACKAGE_DIR/../config" && pwd)"
-POLYGLOT_DIR="$(cd "$PACKAGE_DIR/../polyglot" && pwd)"
-UTILS_DIR="$(cd "$PACKAGE_DIR/../utils" && pwd)"
+PROJECT_ROOT="$(cd "$PACKAGE_DIR/../.." && pwd)"
 PROOF_ROOT="$(mktemp -d)"
-PROOF_VERSION="2.9.0"
+PROOF_VERSION="2.10.0"
 
 cleanup() {
     rm -rf "$PROOF_ROOT"
@@ -39,14 +36,14 @@ archive_package() {
         --quiet
 }
 
-# Tell depends on Config, Agents, Polyglot, and Utils contracts shipped by the
-# same release train. Archive them as distribution artifacts;
-# this deliberately proves installability without a monorepo path repository.
-archive_package "$POLYGLOT_DIR" polyglot instructor-polyglot
-archive_package "$AGENTS_DIR" agents agents
-archive_package "$CONFIG_DIR" config instructor-config
-archive_package "$UTILS_DIR" utils instructor-utils
-archive_package "$PACKAGE_DIR" tell instructor-tell
+# Archive the complete package train so every transitive internal dependency is
+# resolved from distribution artifacts, not from a monorepo path repository.
+for source_dir in "$PROJECT_ROOT"/packages/*; do
+    if [[ -f "$source_dir/composer.json" ]]; then
+        package_slug="$(basename "$source_dir")"
+        archive_package "$source_dir" "$package_slug" "$package_slug"
+    fi
+done
 
 SMOKE_SCRIPT="$PROOF_ROOT/smoke.php"
 cat > "$SMOKE_SCRIPT" <<'PHP'
@@ -56,9 +53,9 @@ declare(strict_types=1);
 
 require __DIR__.'/vendor/autoload.php';
 
-use Cognesy\Tell\Tell;
-use Cognesy\Tell\Shell\TellShellJobApprovals;
-use Cognesy\Tell\Shell\TellShellJobHost;
+use Cognesy\Tell\Testing\TellTestFactory;
+use Cognesy\Tell\Capability\ShellJob\Process\TellShellJobApprovals;
+use Cognesy\Tell\Composition\Standalone\Profile\ShellJob\StandardTellShellJobProfile;
 use Cognesy\Tell\Data\TellRequest;
 use Cognesy\Tell\Data\TellShellJobRequest;
 use Cognesy\Utils\Cli\CliMarkdown;
@@ -69,20 +66,13 @@ if (!class_exists(CliMarkdown::class)) {
 
 $project = sys_get_temp_dir().'/tell-clean-consumer-'.bin2hex(random_bytes(6));
 mkdir($project, 0755, true);
-$tell = Tell::testing($project, 'clean consumer answer');
-try {
-    $result = $tell->run(TellRequest::prompt('local deterministic smoke'));
-    if (trim($result->text()) !== 'clean consumer answer') {
-        throw new RuntimeException('Unexpected clean-consumer result.');
-    }
-    if ($tell->host()->describe()->profile !== 'standard') {
-        throw new RuntimeException('Tell SDK did not boot the standard host.');
-    }
-} finally {
-    $tell->dispose();
+$tell = TellTestFactory::responses('clean consumer answer')->open($project);
+$result = $tell->run(TellRequest::prompt('local deterministic smoke'));
+if (trim($result->text()) !== 'clean consumer answer') {
+    throw new RuntimeException('Unexpected clean-consumer result.');
 }
 
-$host = TellShellJobHost::shellJobs(
+$host = StandardTellShellJobProfile::builder(
     project: $project,
     approval: TellShellJobApprovals::allowAll(),
 )->boot();

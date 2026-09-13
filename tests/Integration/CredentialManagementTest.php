@@ -4,17 +4,19 @@ declare(strict_types=1);
 
 require_once dirname(__DIR__) . '/Pest.php';
 
-use Cognesy\Tell\Command\AuthCommand;
-use Cognesy\Tell\Command\DescribeCommand;
-use Cognesy\Tell\Console\TellApplication;
-use Cognesy\Tell\Console\TellOptions;
+use Cognesy\Tell\Adapter\Console\Command\AuthCommand;
+use Cognesy\Tell\Adapter\Console\Command\DescribeCommand;
+use Cognesy\Tell\Adapter\Console\Symfony\TellOptions;
+use Cognesy\Tell\Capability\Secrets\Standard\StandardTellSecretResolver;
+use Cognesy\Tell\Capability\Secrets\Standard\TellCredentialStore;
+use Cognesy\Tell\Core\Paths\TellPaths;
 use HelgeSverre\Toon\Toon;
 use PHPUnit\Framework\Assert;
 use Symfony\Component\Console\Output\BufferedOutput;
 use Symfony\Component\Console\Tester\CommandTester;
 
 it('registers auth on the real Tell application surface', function (): void {
-    $application = new TellApplication(tellTestFactory());
+    $application = tellTestApplication(tellTestFactory());
     $application->setAutoExit(false);
     $output = new BufferedOutput();
 
@@ -33,7 +35,10 @@ it('registers auth on the real Tell application surface', function (): void {
 it('stores private credentials from stdin without rendering their values', function (): void {
     $factory = tellTestFactory(credentials: []);
     $secret = 'sk-test-$dollar-and-"quote"';
-    $tester = new CommandTester(new AuthCommand($factory, static fn (): string => $secret . "\n"));
+    $tester = new CommandTester(new AuthCommand(
+        new TellCredentialStore($factory->paths()),
+        static fn (): string => $secret . "\n",
+    ));
 
     $status = $tester->execute([
         'action' => 'set',
@@ -53,7 +58,7 @@ it('stores private credentials from stdin without rendering their values', funct
         ])
         ->and($tester->getDisplay())->not->toContain($secret)
         ->and(file_get_contents($credentials))->not->toContain($secret)
-        ->and($factory->credentials()->source()->resolve('OPENAI_API_KEY')?->value())->toBe($secret);
+        ->and(tellTestCredentials($factory)->source()->resolve('OPENAI_API_KEY')?->value())->toBe($secret);
     if (PHP_OS_FAMILY !== 'Windows') {
         expect(fileperms($credentials) & 0777)->toBe(0600);
     }
@@ -62,7 +67,7 @@ it('stores private credentials from stdin without rendering their values', funct
 it('keeps resolved credential values out of agent descriptions', function (): void {
     $secret = 'description-secret-that-must-not-render';
     $factory = tellTestFactory(credentials: ['OPENAI_API_KEY' => $secret]);
-    $tester = new CommandTester(new DescribeCommand($factory));
+    $tester = new CommandTester(new DescribeCommand(tellTestAgents($factory)));
 
     $status = $tester->execute(['--json' => true, '--dir' => tellLastTemporaryRoot()]);
 
@@ -75,17 +80,20 @@ it('reports safe credential provenance in deterministic precedence order', funct
     $workspace = tellLastTemporaryRoot();
     $variable = 'TELL_LAYERED_TEST_API_KEY';
     $original = getenv($variable);
-    $factory->credentials()->set($variable, 'tell-value');
-    file_put_contents($workspace . '/.env', $variable . '="workspace-value"' . "\n");
+    tellTestCredentials($factory)->set($variable, 'tell-value');
+    $nested = $workspace . '/nested/project';
+    mkdir($workspace . '/.tell', 0700, true);
+    mkdir($nested, 0755, true);
+    file_put_contents($workspace . '/.tell/.env', $variable . '="workspace-value"' . "\n");
     putenv($variable . '=process-value');
 
     try {
-        $tester = new CommandTester(new AuthCommand($factory));
+        $tester = new CommandTester(new AuthCommand(new TellCredentialStore($factory->paths())));
         $tester->execute([
             'action' => 'status',
             'provider' => 'layered-test',
             '--variable' => $variable,
-            '--dir' => $workspace,
+            '--dir' => $nested,
             '--json' => true,
         ]);
         $process = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
@@ -95,17 +103,17 @@ it('reports safe credential provenance in deterministic precedence order', funct
             'action' => 'status',
             'provider' => 'layered-test',
             '--variable' => $variable,
-            '--dir' => $workspace,
+            '--dir' => $nested,
             '--json' => true,
         ]);
         $workspaceSource = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
 
-        unlink($workspace . '/.env');
+        unlink($workspace . '/.tell/.env');
         $tester->execute([
             'action' => 'status',
             'provider' => 'layered-test',
             '--variable' => $variable,
-            '--dir' => $workspace,
+            '--dir' => $nested,
             '--json' => true,
         ]);
         $tell = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
@@ -125,12 +133,27 @@ it('reports safe credential provenance in deterministic precedence order', funct
     }
 });
 
+it('does not misclassify the user profile dotenv while walking workspace ancestors', function (): void {
+    $factory = tellTestFactory(credentials: []);
+    $root = tellLastTemporaryRoot();
+    $paths = new TellPaths($factory->paths()->packageAgents, $root . '/.tell');
+    $nested = $root . '/nested/project';
+    $variable = 'TELL_USER_PROFILE_TEST_API_KEY';
+    mkdir($nested, 0755, true);
+    (new TellCredentialStore($paths))->set($variable, 'user-value');
+
+    $resolved = (new StandardTellSecretResolver($paths, $nested))->resolve($variable);
+
+    expect($resolved?->source)->toBe('tell-credentials')
+        ->and($resolved?->value())->toBe('user-value');
+});
+
 it('requires explicit stdin and removes only Tell-owned credentials', function (): void {
     $factory = tellTestFactory(credentials: ['OPENAI_API_KEY' => 'stored']);
-    $invalid = new CommandTester(new AuthCommand($factory));
+    $invalid = new CommandTester(new AuthCommand(new TellCredentialStore($factory->paths())));
     $invalidStatus = $invalid->execute(['action' => 'set', 'provider' => 'openai']);
 
-    $remove = new CommandTester(new AuthCommand($factory));
+    $remove = new CommandTester(new AuthCommand(new TellCredentialStore($factory->paths())));
     $firstStatus = $remove->execute(['action' => 'remove', 'provider' => 'openai']);
     $first = Toon::decode($remove->getDisplay());
     $secondStatus = $remove->execute(['action' => 'remove', 'provider' => 'openai']);
@@ -163,11 +186,11 @@ apiKey: "${CUSTOM_API_KEY}"
 model: project-model
 YAML);
 
-    $config = $factory->definition(new TellOptions(
+    $config = $factory->definition((new TellOptions(
         prompt: 'test',
         connection: 'custom',
         directory: $workspace,
-    ))->llmConfig;
+    ))->request())->llmConfig;
 
     expect($config?->apiUrl)->toBe('https://project.example/v1')
         ->and($config?->model)->toBe('project-model')
@@ -189,11 +212,11 @@ apiKey: "${MISSING_TEST_API_KEY}"
 model: missing-model
 YAML);
 
-        expect(fn () => $factory->assertReady(new TellOptions(
+        expect(fn () => $factory->assertReady((new TellOptions(
             prompt: 'test',
             connection: 'missing-test',
             directory: $workspace,
-        )))->toThrow(RuntimeException::class, 'Missing credential MISSING_TEST_API_KEY');
+        ))->request()))->toThrow(RuntimeException::class, 'Missing credential MISSING_TEST_API_KEY');
     } finally {
         match ($original) {
             false => putenv($variable),
@@ -210,7 +233,7 @@ it('rejects credential files readable by other users', function (): void {
     file_put_contents($factory->paths()->credentials, 'OPENAI_API_KEY="unsafe"' . "\n");
     chmod($factory->paths()->credentials, 0644);
 
-    expect(fn () => $factory->credentials()->variables())
+    expect(fn () => tellTestCredentials($factory)->variables())
         ->toThrow(RuntimeException::class, 'permissions are too broad');
 });
 
@@ -221,7 +244,7 @@ it('does not retain malformed credential contents in exceptions', function (): v
     chmod($factory->paths()->credentials, 0600);
 
     try {
-        $factory->credentials()->variables();
+        tellTestCredentials($factory)->variables();
         Assert::fail('Expected malformed credentials to fail.');
     } catch (RuntimeException $error) {
         expect($error->getMessage())->toBe('Unable to parse Tell credentials file.')

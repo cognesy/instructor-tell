@@ -3,11 +3,47 @@
 declare(strict_types=1);
 
 use Cognesy\Agents\AgentLoop;
+use Cognesy\Agents\Capability\Cancellation\CanProvideCancellationSignal;
+use Cognesy\Agents\Capability\Cancellation\InMemoryCancellationSource;
 use Cognesy\Agents\Drivers\CanUseTools;
-use Cognesy\Tell\Configuration\TellCredentialStore;
-use Cognesy\Tell\Configuration\TellPaths;
-use Cognesy\Tell\Discovery\StartupScanCounter;
-use Cognesy\Tell\Runtime\TellAgentFactory;
+use Cognesy\Tell\Capability\Secrets\Standard\TellCredentialStore;
+use Cognesy\Tell\Core\Paths\TellPaths;
+use Cognesy\Tell\Capability\Model\Polyglot\PolyglotTellModelResolver;
+use Cognesy\Tell\Capability\Secrets\Standard\StandardTellSecretResolver;
+use Cognesy\Tell\Capability\Configuration\Standard\StandardTellConfigurationResolver;
+use Cognesy\Tell\Capability\Discovery\Polyglot\PolyglotTellProviderCatalogue;
+use Cognesy\Tell\Capability\Paths\Installed\StandardTellPathResolver;
+use Cognesy\Tell\Core\Workspace\Execution\TellExecutionWorkspaceProvider;
+use Cognesy\Tell\Core\Workspace\TellConversations;
+use Cognesy\Tell\Composition\Standalone\StandaloneTellBuilder;
+use Cognesy\Tell\Adapter\Console\Symfony\TellConsoleApplication;
+use Cognesy\Tell\Adapter\Console\Symfony\TellCommand;
+use Cognesy\Tell\Core\Contract\Agent\CanBuildTellAgent;
+use Cognesy\Tell\Core\Contract\Discovery\CanCatalogueTellProviders;
+use Cognesy\Tell\Core\Contract\Workspace\CanOpenTellWorkspace;
+use Cognesy\Tell\Core\Contract\Workspace\CanAccessTellConversations;
+use Cognesy\Tell\Capability\Observation\FilesystemTrace\StandardTellExecutionTracer;
+use Cognesy\Tell\Capability\Observation\ExecutionJournal\StandardTellExecutionJournal;
+use Cognesy\Tell\Core\Contract\Tool\CanDispatchTellTool;
+use Cognesy\Tell\Core\Contract\Model\CanResolveTellModel;
+use Cognesy\Tell\Core\Discovery\StartupScanCounter;
+use Cognesy\Tell\Core\Agent\TellAgentFactory;
+use Cognesy\Tell\Core\Agent\TellAgentContributions;
+use Cognesy\Tell\Capability\Execution\System\SystemTellClock;
+use Cognesy\Tell\Capability\Agent\ComposerDiscovery\ComposerTellAgentContribution;
+use Cognesy\Tell\Capability\Agent\Definitions\FilesystemTellAgentDefinitions;
+use Cognesy\Tell\Capability\Agent\Standard\StandardTellAgentContribution;
+use Cognesy\Tell\Capability\Agent\Subagent\TellSubagentContribution;
+use Cognesy\Tell\Capability\Tool\AskUser\AskUserToolContribution;
+use Cognesy\Tell\Capability\Tool\Coding\CodingToolContribution;
+use Cognesy\Tell\Core\Execution\TellRuntime;
+use Cognesy\Tell\Core\Execution\TellRuntimeFactory;
+use Cognesy\Tell\Capability\Observation\Null\NullTellObserver;
+use Cognesy\Tell\Capability\Tool\Standard\StandardTellToolDispatcher;
+use Cognesy\Tell\Tell;
+use Cognesy\Tell\Testing\TellTestFactory;
+use Cognesy\Tell\Capability\Workspace\Filesystem\WorkspaceRepository;
+use Cognesy\Tell\Capability\Workspace\Filesystem\FilesystemTellWorkspaceProvider;
 
 /** @var list<string> $tellTemporaryRoots */
 $tellTemporaryRoots = [];
@@ -25,6 +61,7 @@ function tellTestFactory(
     ?CanUseTools $driver = null,
     ?string $composerVendorDir = null,
     ?string $rootComposerPath = null,
+    ?CanResolveTellModel $modelResolver = null,
 ): TellAgentFactory {
     global $tellTemporaryRoots;
 
@@ -59,14 +96,173 @@ MD);
     }
     $tellTemporaryRoots[] = $root;
 
-    return new TellAgentFactory(
+    return tellAgentFactoryForPaths(
         paths: $paths,
-        decorateLoop: $decorate,
+        directory: $root,
+        decorate: $decorate,
         driver: $driver,
         startupScans: $startupScans,
         composerVendorDir: $composerVendorDir,
         rootComposerPath: $rootComposerPath,
+        modelResolver: $modelResolver,
     );
+}
+
+/** @param callable(AgentLoop): AgentLoop|null $decorate */
+function tellAgentFactoryForPaths(
+    TellPaths $paths,
+    string $directory,
+    ?callable $decorate = null,
+    ?CanUseTools $driver = null,
+    ?StartupScanCounter $startupScans = null,
+    ?string $composerVendorDir = null,
+    ?string $rootComposerPath = null,
+    ?CanResolveTellModel $modelResolver = null,
+): TellAgentFactory {
+    return new TellAgentFactory(
+        paths: $paths,
+        tracer: new StandardTellExecutionTracer($paths),
+        clock: new SystemTellClock(),
+        modelResolver: $modelResolver ?? new PolyglotTellModelResolver($paths, new StandardTellSecretResolver($paths, $directory)),
+        providerCatalogue: new PolyglotTellProviderCatalogue($paths),
+        definitionLoader: new FilesystemTellAgentDefinitions($paths, $startupScans),
+        contributions: new TellAgentContributions(
+            new ComposerTellAgentContribution($startupScans, $composerVendorDir, $rootComposerPath),
+            new CodingToolContribution($paths),
+            new AskUserToolContribution(),
+            new TellSubagentContribution(),
+            new StandardTellAgentContribution(),
+        ),
+        decorateLoop: $decorate,
+        driver: $driver,
+    );
+}
+
+function tellTestAgents(TellAgentFactory $factory): CanBuildTellAgent {
+    return $factory;
+}
+
+function tellTestWorkspaces(): WorkspaceRepository {
+    return new WorkspaceRepository();
+}
+
+function tellTestWorkspaceProvider(?WorkspaceRepository $repository = null): CanOpenTellWorkspace {
+    return new FilesystemTellWorkspaceProvider($repository ?? tellTestWorkspaces());
+}
+
+function tellTestConversations(
+    TellAgentFactory $factory,
+    ?WorkspaceRepository $repository = null,
+): CanAccessTellConversations {
+    $repository ??= tellTestWorkspaces();
+    $workspaces = new FilesystemTellWorkspaceProvider($repository);
+
+    return new TellConversations(
+        tellTestAgents($factory),
+        tellTestRuntimeFactory($factory, $repository),
+        tellTestTracer($factory),
+        $workspaces,
+        $factory->paths(),
+        tellTestProviderCatalogue($factory),
+    );
+}
+
+function tellTestCredentials(TellAgentFactory $factory): TellCredentialStore {
+    return new TellCredentialStore($factory->paths());
+}
+
+function tellTestTracer(TellAgentFactory $factory): StandardTellExecutionTracer {
+    return new StandardTellExecutionTracer($factory->paths());
+}
+
+function tellTestProviderCatalogue(TellAgentFactory $factory): CanCatalogueTellProviders {
+    return new PolyglotTellProviderCatalogue($factory->paths());
+}
+
+function tellTestRuntime(
+    TellAgentFactory $factory,
+    ?CanProvideCancellationSignal $cancellation = null,
+    ?WorkspaceRepository $workspaces = null,
+): TellRuntime {
+    return tellTestRuntimeFactory($factory, $workspaces)->create($cancellation);
+}
+
+function tellTestRuntimeFactory(
+    TellAgentFactory $factory,
+    ?WorkspaceRepository $workspaces = null,
+): TellRuntimeFactory {
+    $workspaceProvider = new FilesystemTellWorkspaceProvider($workspaces ?? tellTestWorkspaces());
+
+    return new TellRuntimeFactory(
+        agents: tellTestAgents($factory),
+        workspaces: new TellExecutionWorkspaceProvider($workspaceProvider),
+        tracer: tellTestTracer($factory),
+        journal: new StandardTellExecutionJournal($factory->paths()),
+        cancellation: new InMemoryCancellationSource(),
+        configuration: new StandardTellConfigurationResolver(
+            new StandardTellPathResolver($factory->paths()),
+            $workspaceProvider,
+        ),
+        observer: new NullTellObserver(),
+    );
+}
+
+function tellTestCommand(TellAgentFactory $factory): TellCommand {
+    return new TellCommand(
+        tellTestRuntimeFactory($factory),
+        tellTestAgents($factory),
+        tellTestWorkspaceProvider(),
+        tellTestWorkspaceProvider(),
+        $factory->paths(),
+    );
+}
+
+function tellTestToolDispatcher(TellAgentFactory $factory): CanDispatchTellTool {
+    $agents = tellTestAgents($factory);
+    $workspaces = new FilesystemTellWorkspaceProvider(tellTestWorkspaces());
+
+    return new StandardTellToolDispatcher(
+        $agents,
+        new StandardTellConfigurationResolver(
+            new StandardTellPathResolver($factory->paths()),
+            $workspaces,
+        ),
+        '.',
+    );
+}
+
+function tellTestOpen(
+    string $directory,
+    TellAgentFactory $factory,
+    ?CanProvideCancellationSignal $cancellation = null,
+): Tell {
+    $builder = StandaloneTellBuilder::in($directory, $factory->paths())
+        ->withAgentBuilder(tellTestAgents($factory));
+    if ($cancellation !== null) {
+        $builder->withCancellation($cancellation);
+    }
+
+    return $builder->build();
+}
+
+function tellTestResponses(string $directory, string ...$responses): Tell {
+    return TellTestFactory::responses(...$responses)->open($directory);
+}
+
+function tellTestApplication(
+    TellAgentFactory $factory,
+    ?WorkspaceRepository $workspaces = null,
+): TellConsoleApplication {
+    $cwd = getcwd();
+    $builder = StandaloneTellBuilder::in(
+        is_string($cwd) ? $cwd : '.',
+        $factory->paths(),
+    )->withAgentBuilder(tellTestAgents($factory));
+    if ($workspaces !== null) {
+        $builder->withWorkspace(new FilesystemTellWorkspaceProvider($workspaces));
+    }
+
+    return $builder->buildCli();
 }
 
 function tellLastTemporaryRoot(): string {

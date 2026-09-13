@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace Cognesy\Tell\Data;
 
-use Cognesy\Tell\Configuration\TellExecutionPolicy;
 use InvalidArgumentException;
 
 /** One direct Tell tool invocation, without model inference or conversation publication. */
@@ -14,6 +13,7 @@ final readonly class TellToolRequest
     private function __construct(
         public string $name,
         public array $arguments,
+        public string $directory = '',
         public string $agent = 'default',
         public string $connection = 'openai',
         public string $model = '',
@@ -25,6 +25,8 @@ final readonly class TellToolRequest
         public bool $connectionExplicit = false,
         public bool $modelExplicit = false,
         public bool $toolsExplicit = false,
+        /** @var array<string, int> */
+        public array $policyOverrides = [],
         public ?TellExecutionPolicy $policy = null,
     ) {
         if ($name === '') {
@@ -40,10 +42,52 @@ final readonly class TellToolRequest
         return new self($name, $arguments);
     }
 
+    /** @param array<string, mixed> $arguments */
+    public static function fromRequest(TellRequest $request, string $name, array $arguments): self {
+        return new self(
+            name: $name,
+            arguments: $arguments,
+            directory: $request->directory,
+            agent: $request->agent,
+            connection: $request->connection,
+            model: $request->model,
+            dsn: $request->dsn,
+            branch: $request->branch,
+            tools: $request->tools,
+            maxSteps: $request->maxSteps,
+            connectionExplicit: $request->connectionExplicit,
+            modelExplicit: $request->modelExplicit,
+            toolsExplicit: $request->toolsExplicit,
+            policyOverrides: $request->policyOverrides,
+            policy: $request->policy,
+        );
+    }
+
+    public function asRequest(string $defaultDirectory = ''): TellRequest {
+        return new TellRequest(
+            prompt: 'Direct tool invocation.',
+            directory: $this->directory !== '' ? $this->directory : $defaultDirectory,
+            agent: $this->agent,
+            connection: $this->connection,
+            model: $this->model,
+            dsn: $this->dsn,
+            branch: $this->branch,
+            tools: $this->tools,
+            maxSteps: $this->maxSteps,
+            mode: TellExecutionMode::Automatic,
+            connectionExplicit: $this->connectionExplicit,
+            modelExplicit: $this->modelExplicit,
+            toolsExplicit: $this->toolsExplicit,
+            policyOverrides: $this->policyOverrides,
+            policy: $this->policy,
+        );
+    }
+
     public function branch(?string $branch): self {
         return new self(
             name: $this->name,
             arguments: $this->arguments,
+            directory: $this->directory,
             agent: $this->agent,
             connection: $this->connection,
             model: $this->model,
@@ -54,6 +98,7 @@ final readonly class TellToolRequest
             connectionExplicit: $this->connectionExplicit,
             modelExplicit: $this->modelExplicit,
             toolsExplicit: $this->toolsExplicit,
+            policyOverrides: $this->policyOverrides,
             policy: $this->policy,
         );
     }
@@ -85,6 +130,7 @@ final readonly class TellToolRequest
         return new self(
             name: $this->name,
             arguments: $this->arguments,
+            directory: $this->directory,
             agent: $this->agent,
             connection: $connection ?? $this->connection,
             model: $model ?? $this->model,
@@ -95,6 +141,7 @@ final readonly class TellToolRequest
             connectionExplicit: $connection !== null || $this->connectionExplicit,
             modelExplicit: $model !== null || $this->modelExplicit,
             toolsExplicit: $tools !== null || $this->toolsExplicit,
+            policyOverrides: $this->policyOverrides,
             policy: $policy ?? $this->policy,
         );
     }

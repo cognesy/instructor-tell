@@ -12,19 +12,19 @@ use Cognesy\Agents\Drivers\CanUseTools;
 use Cognesy\Agents\Drivers\Testing\FakeAgentDriver;
 use Cognesy\Agents\Drivers\Testing\ScenarioStep;
 use Cognesy\Agents\Session\Data\SessionId;
-use Cognesy\Tell\Console\TellCommand;
-use Cognesy\Tell\Runtime\TellAgentFactory;
+use Cognesy\Tell\Adapter\Console\Symfony\TellCommand;
+use Cognesy\Tell\Core\Agent\TellAgentFactory;
 use Cognesy\Tell\Tests\Support\RecordingDriver;
 use Cognesy\Tell\Tests\Support\RequestRecorder;
-use Cognesy\Tell\Workspace\Arena\FilesystemArena;
-use Cognesy\Tell\Workspace\Arena\Record\ConversationRoot;
-use Cognesy\Tell\Workspace\Arena\Record\Lineage;
-use Cognesy\Tell\Workspace\Arena\Record\Message as RecordMessage;
-use Cognesy\Tell\Workspace\Arena\Record\Role;
-use Cognesy\Tell\Workspace\Arena\Record\TextPart;
-use Cognesy\Tell\Workspace\Arena\Record\Turn;
-use Cognesy\Tell\Workspace\Session\SessionRef;
-use Cognesy\Tell\Workspace\WorkspaceState;
+use Cognesy\Tell\Capability\Workspace\Filesystem\FilesystemArena;
+use Cognesy\Tell\Core\Workspace\Arena\Record\ConversationRoot;
+use Cognesy\Tell\Core\Workspace\Arena\Record\Lineage;
+use Cognesy\Tell\Core\Workspace\Arena\Record\Message as RecordMessage;
+use Cognesy\Tell\Core\Workspace\Arena\Record\Role;
+use Cognesy\Tell\Core\Workspace\Arena\Record\TextPart;
+use Cognesy\Tell\Core\Workspace\Arena\Record\Turn;
+use Cognesy\Tell\Core\Workspace\Session\SessionRef;
+use Cognesy\Tell\Capability\Workspace\Filesystem\WorkspaceState;
 use Symfony\Component\Console\Tester\CommandTester;
 
 it('runs transient and durable turns with the same compiled workspace context while only the durable turn publishes', function (): void {
@@ -35,7 +35,7 @@ it('runs transient and durable turns with the same compiled workspace context wh
     tellTransientSeedHistory(new FilesystemArena($workspace));
     $beforeArena = tellTransientSnapshot($workspace->paths->arena);
     $beforeSessions = tellTransientSnapshot($factory->paths()->sessions);
-    $command = new TellCommand($factory);
+    $command = tellTestCommand($factory);
     $transient = new CommandTester($command);
 
     expect($transient->execute([
@@ -46,10 +46,11 @@ it('runs transient and durable turns with the same compiled workspace context wh
     ]))->toBe(0);
     $transientPayload = json_decode($transient->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
 
-    expect($transientPayload)->toMatchArray([
-        'answer' => 'answer',
-        'execution' => ['mode' => 'transient', 'durable' => false],
-    ])
+    expect($transientPayload['answer'])->toBe('answer')
+        ->and($transientPayload['execution']['mode'])->toBe('transient')
+        ->and($transientPayload['execution']['status'])->toBe('completed')
+        ->and($transientPayload['publication']['status'])->toBe('not_applicable')
+        ->and($transientPayload['publication']['headChanged'])->toBeFalse()
         ->and(tellTransientSnapshot($workspace->paths->arena))->toBe($beforeArena)
         ->and(tellTransientSnapshot($factory->paths()->sessions))->toBe($beforeSessions);
 
@@ -60,16 +61,8 @@ it('runs transient and durable turns with the same compiled workspace context wh
         '--output' => 'json',
     ]))->toBe(0);
 
-    $messages = static fn (array $request): array => array_map(
-        static fn (array $message): array => [
-            'role' => $message['role'],
-            'content' => $message['content'],
-        ],
-        $request,
-    );
-
     expect($recorder->requests)->toHaveCount(2)
-        ->and($messages($recorder->requests[0]))->toBe($messages($recorder->requests[1]));
+        ->and($recorder->textProjection(0))->toBe($recorder->textProjection(1));
 });
 
 it('reads named canonical workspace session history without changing the arena', function (): void {
@@ -81,7 +74,7 @@ it('reads named canonical workspace session history without changing the arena',
     $sessionRef = new SessionRef($session);
     tellTransientSeedHistory(new FilesystemArena($workspace), $sessionRef->refName(), $sessionRef);
     $beforeArena = tellTransientSnapshot($workspace->paths->arena);
-    $tester = new CommandTester(new TellCommand($factory));
+    $tester = new CommandTester(tellTestCommand($factory));
 
     expect($tester->execute([
         'prompt' => 'inspect session safely',
@@ -91,13 +84,7 @@ it('reads named canonical workspace session history without changing the arena',
         '--output' => 'json',
     ]))->toBe(0);
 
-    $messages = array_map(
-        static fn (array $message): array => [
-            'role' => $message['role'],
-            'content' => $message['content'],
-        ],
-        $recorder->requests[0],
-    );
+    $messages = $recorder->textProjection(0);
 
     expect($messages)->toContain([
         'role' => 'user',
@@ -108,7 +95,7 @@ it('reads named canonical workspace session history without changing the arena',
 
 it('keeps transient text and events explicitly non-durable while leaving tool-enabled workspace state unchanged', function (): void {
     $factory = tellTestFactory(static fn (AgentLoop $loop): AgentLoop => $loop->withDriver(FakeAgentDriver::fromSteps(
-        ScenarioStep::toolCall('read', ['path' => 'notes.txt']),
+        ScenarioStep::toolCall('read_file', ['path' => 'notes.txt']),
         ScenarioStep::final('tool-assisted transient answer'),
     )));
     $project = tellTransientProject($factory);
@@ -116,7 +103,7 @@ it('keeps transient text and events explicitly non-durable while leaving tool-en
     file_put_contents($project . '/notes.txt', 'safe workspace tool input');
     tellTransientSeedHistory(new FilesystemArena($workspace));
     $before = tellTransientSnapshot($workspace->paths->arena);
-    $text = new CommandTester(new TellCommand($factory));
+    $text = new CommandTester(tellTestCommand($factory));
 
     expect($text->execute([
         'prompt' => 'read the note transiently',
@@ -128,7 +115,7 @@ it('keeps transient text and events explicitly non-durable while leaving tool-en
         ->and($text->getErrorOutput())->toContain('transient: no conversation or session state was persisted')
         ->and(tellTransientSnapshot($workspace->paths->arena))->toBe($before);
 
-    $events = new CommandTester(new TellCommand($factory));
+    $events = new CommandTester(tellTestCommand($factory));
     expect($events->execute([
         'prompt' => 'repeat safely',
         '--dir' => $project,
@@ -142,8 +129,8 @@ it('keeps transient text and events explicitly non-durable while leaving tool-en
 
     expect(array_filter(
         $lines,
-        static fn (array $event): bool => $event['schema'] === 'tell.event.v1'
-            && $event['kind'] === 'execution.completed'
+        static fn (array $event): bool => $event['schema'] === 'tell.event.v2'
+            && $event['kind'] === 'execution.settled'
             && $event['terminal'] === 'completed',
     ))->not->toBeEmpty()
         ->and(tellTransientSnapshot($workspace->paths->arena))->toBe($before);
@@ -156,7 +143,7 @@ it('marks transient failures and cancellation without publishing state', functio
     tellTransientSeedHistory(new FilesystemArena($workspace));
     $beforeArena = tellTransientSnapshot($workspace->paths->arena);
     $beforeSessions = tellTransientSnapshot($factory->paths()->sessions);
-    $tester = new CommandTester(new TellCommand($factory));
+    $tester = new CommandTester(tellTestCommand($factory));
 
     $status = $tester->execute([
         'prompt' => 'must not persist',
@@ -167,7 +154,9 @@ it('marks transient failures and cancellation without publishing state', functio
     $payload = json_decode($tester->getDisplay(), true, flags: JSON_THROW_ON_ERROR);
 
     expect($status)->toBe($expectedStatus)
-        ->and($payload['execution'])->toBe(['mode' => 'transient', 'durable' => false])
+        ->and($payload['execution']['mode'])->toBe('transient')
+        ->and($payload['publication']['status'])->toBe('not_applicable')
+        ->and($payload['publication']['headChanged'])->toBeFalse()
         ->and(tellTransientSnapshot($workspace->paths->arena))->toBe($beforeArena)
         ->and(tellTransientSnapshot($factory->paths()->sessions))->toBe($beforeSessions);
 })->with([
@@ -183,7 +172,7 @@ it('keeps a no-workspace transient invocation stateless and records only redacte
     $factory = tellTestFactory(static fn (AgentLoop $loop): AgentLoop => $loop->withDriver(FakeAgentDriver::fromResponses('stateless answer')));
     $project = tellLastTemporaryRoot() . '/no-workspace';
     mkdir($project, 0700, true);
-    $tester = new CommandTester(new TellCommand($factory));
+    $tester = new CommandTester(tellTestCommand($factory));
 
     expect($tester->execute([
         'prompt' => 'transient private prompt',
@@ -197,12 +186,14 @@ it('keeps a no-workspace transient invocation stateless and records only redacte
     $sessionFiles = glob($factory->paths()->sessionTraces . '/*.jsonl') ?: [];
     $records = tellTransientTraceRecords($sessionFiles[0] ?? '');
 
-    expect($payload['execution'])->toBe(['mode' => 'transient', 'durable' => false])
+    expect($payload['execution']['mode'])->toBe('transient')
+        ->and($payload['publication']['status'])->toBe('not_applicable')
+        ->and($payload['publication']['headChanged'])->toBeFalse()
         ->and(is_dir($project . '/.tell'))->toBeFalse()
         ->and(is_dir($factory->paths()->sessions))->toBeFalse()
         ->and($files)->toBe([])
         ->and($sessionFiles)->toHaveCount(1)
-        ->and($records[0]['schema'])->toBe('tell.event.v1')
+        ->and($records[0]['schema'])->toBe('tell.event.v2')
         ->and($records[0]['kind'])->toBe('execution.started')
         ->and($records[0]['metadata'])->not->toHaveKey('messagePayload')
         ->and(json_encode($records, JSON_THROW_ON_ERROR))->not->toContain('transient private prompt');
@@ -211,13 +202,13 @@ it('keeps a no-workspace transient invocation stateless and records only redacte
 function tellTransientProject(TellAgentFactory $factory): string {
     $project = tellLastTemporaryRoot() . '/transient-workspace';
     mkdir($project, 0700, true);
-    $factory->workspace()->initialize($project);
+    tellTestWorkspaces()->initialize($project);
 
     return $project;
 }
 
 function tellTransientWorkspace(TellAgentFactory $factory, string $project): WorkspaceState {
-    $workspace = $factory->workspace()->discover($project);
+    $workspace = tellTestWorkspaces()->discover($project);
     if ($workspace === null) {
         throw new RuntimeException('Expected initialized Tell workspace to be discoverable.');
     }

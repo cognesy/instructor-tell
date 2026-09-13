@@ -4,12 +4,15 @@ declare(strict_types=1);
 
 require_once dirname(__DIR__) . '/Pest.php';
 
-use Cognesy\Tell\Command\ToolCommand;
-use Cognesy\Tell\Console\TellOptions;
-use Cognesy\Tell\Runtime\TellSignalCancellationSource;
+use Cognesy\Tell\Adapter\Console\Command\ToolCommand;
+use Cognesy\Tell\Adapter\Console\Symfony\TellOptions;
+use Cognesy\Tell\Capability\Configuration\Standard\StandardTellConfigurationResolver;
+use Cognesy\Tell\Capability\Paths\Installed\StandardTellPathResolver;
+use Cognesy\Tell\Data\TellToolRequest;
+use Cognesy\Tell\Adapter\Console\Symfony\TellSignalCancellationSource;
 use Cognesy\Tell\Tests\Support\RecordingDriver;
 use Cognesy\Tell\Tests\Support\RequestRecorder;
-use Cognesy\Tell\Tool\TellToolDispatcher;
+use Cognesy\Tell\Capability\Tool\Standard\TellToolDispatcher;
 use Symfony\Component\Console\Tester\CommandTester;
 
 it('invokes the resolved canonical tool directly without inference or workspace publication', function (): void {
@@ -17,7 +20,7 @@ it('invokes the resolved canonical tool directly without inference or workspace 
     $factory = tellTestFactory(static fn ($loop) => $loop->withDriver(new RecordingDriver($recorder)));
     $directory = tellLastTemporaryRoot();
     file_put_contents($directory . '/note.txt', "direct evidence\n");
-    $tester = new CommandTester(new ToolCommand($factory));
+    $tester = new CommandTester(new ToolCommand(tellTestToolDispatcher($factory)));
 
     $status = $tester->execute([
         'name' => 'read_file',
@@ -39,7 +42,7 @@ it('invokes the resolved canonical tool directly without inference or workspace 
 it('uses the exact resolved allow-list and strict tool schema', function (): void {
     $factory = tellTestFactory();
     $directory = tellLastTemporaryRoot();
-    $tester = new CommandTester(new ToolCommand($factory));
+    $tester = new CommandTester(new ToolCommand(tellTestToolDispatcher($factory)));
 
     $disabled = $tester->execute([
         'name' => 'shell',
@@ -68,7 +71,7 @@ it('uses the exact resolved allow-list and strict tool schema', function (): voi
 it('honours direct policy rejection and emits normalized payload-free events', function (): void {
     $factory = tellTestFactory();
     $directory = tellLastTemporaryRoot();
-    $tester = new CommandTester(new ToolCommand($factory));
+    $tester = new CommandTester(new ToolCommand(tellTestToolDispatcher($factory)));
 
     $blocked = $tester->execute([
         'name' => 'shell',
@@ -92,7 +95,7 @@ it('honours direct policy rejection and emits normalized payload-free events', f
     expect($blocked)->toBe(1)
         ->and($blockedPayload['error']['code'])->toBe('policy_rejected')
         ->and($events)->toBe(0)
-        ->and($event['schema'])->toBe('tell.event.v1')
+        ->and($event['schema'])->toBe('tell.event.v2')
         ->and($event['kind'])->toBe('tool.started')
         ->and($event['metadata'])->toHaveKeys(['tool', 'effect'])
         ->and($terminal['terminal'])->toBe('completed');
@@ -101,7 +104,7 @@ it('honours direct policy rejection and emits normalized payload-free events', f
 
 it('rejects ambiguous and malformed argument sources with usage exit code two', function (): void {
     $factory = tellTestFactory();
-    $tester = new CommandTester(new ToolCommand($factory));
+    $tester = new CommandTester(new ToolCommand(tellTestToolDispatcher($factory)));
 
     $ambiguous = $tester->execute([
         'name' => 'read_file',
@@ -130,7 +133,7 @@ it('reports bounded timeouts and pre-cancelled direct work without inference', f
     $recorder = new RequestRecorder();
     $factory = tellTestFactory(static fn ($loop) => $loop->withDriver(new RecordingDriver($recorder)));
     $directory = tellLastTemporaryRoot();
-    $tester = new CommandTester(new ToolCommand($factory));
+    $tester = new CommandTester(new ToolCommand(tellTestToolDispatcher($factory)));
 
     $timeout = $tester->execute([
         'name' => 'shell',
@@ -143,14 +146,21 @@ it('reports bounded timeouts and pre-cancelled direct work without inference', f
 
     $cancellation = new TellSignalCancellationSource();
     $cancellation->cancel();
-    $cancelled = (new TellToolDispatcher($factory, $cancellation))->dispatch(
-        new TellOptions(prompt: 'direct', directory: $directory),
+    $agents = tellTestAgents($factory);
+    $cancelled = (new TellToolDispatcher(
+        $agents,
+        new StandardTellConfigurationResolver(
+            new StandardTellPathResolver($factory->paths()),
+        ),
+        $cancellation,
+    ))->dispatch(TellToolRequest::fromRequest(
+        (new TellOptions(prompt: 'direct', directory: $directory))->request(),
         'shell',
         ['command' => 'printf never'],
-    );
+    ));
 
     expect($timeout)->toBe(1)
         ->and($timeoutPayload['error']['code'])->toBe('timeout')
-        ->and($cancelled['error']['code'])->toBe('cancelled')
+        ->and($cancelled->error['code'])->toBe('cancelled')
         ->and($recorder->requests)->toBe([]);
 });

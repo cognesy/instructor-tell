@@ -11,8 +11,6 @@ final readonly class TellToolResult
     public function __construct(
         public string $tool,
         public bool $success,
-        public string $operation,
-        public string $invokedAs,
         public mixed $data,
         public ?array $error,
         public bool $truncated,
@@ -24,5 +22,20 @@ final readonly class TellToolResult
     /** @return array{mode: 'direct', inference: false, durable: false} */
     public function execution(): array {
         return ['mode' => 'direct', 'inference' => false, 'durable' => false];
+    }
+
+    /** @return array<string, mixed> */
+    public function toArray(): array {
+        return [
+            'tool' => $this->tool,
+            'success' => $this->success,
+            'data' => $this->data,
+            'error' => $this->error,
+            'truncated' => $this->truncated,
+            'partial' => $this->partial,
+            'durationClass' => $this->durationClass,
+            'effect' => $this->effect,
+            'execution' => $this->execution(),
+        ];
     }
 }
